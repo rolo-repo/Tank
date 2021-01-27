@@ -96,7 +96,7 @@ RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
 void setup()
 {
 	//LOG_MSG_BEGIN(115200);
-	delay(1000);
+	//delay(1000);
 
 	radio.begin(); 
 	radio.setAutoAck(1);       
@@ -115,15 +115,17 @@ void setup()
 	radio.startListening();  
 	stsLed.turn_on();
 
-	delay(1000);
+	
 	//analogWriteFrequency(1000);
 	//analogWriteResolution(8);
 	/*ledcSetup( 0, 1000, 8 );
 	ledcAttachPin( motorRSpdPin, 0 );*/
 	
-	motorR.begin(0);
-	motorL.begin(1);
+	motorR.begin();
+	motorL.begin();
 
+	delay(1000);
+	
 	LOG_MSG("Ready");
 }
 /*
@@ -165,6 +167,100 @@ long map(const long x, const long in_min, const long in_max, const long out_min,
 		return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
+void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 , int16_t &o_m2 )
+{
+	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
+	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
+	int32_t nPivSpeed;      // Pivot Speed                          (-128..+127)
+	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
+	float   fPivYLimit = 35.0; //should be more or less equal to dead zone of motor
+
+	// INPUTS
+	//int32_t     nJoyX;              // Joystick X input                     (-128..+127)
+	//int32_t     nJoyY;              // Joystick Y input                     (-128..+127)
+
+	// OUTPUTS
+	//int32_t     nMotMixL;           // Motor (left)  mixed output           (-128..+127)
+	//int32_t     nMotMixR;           // Motor (right) mixed output           (-128..+127)
+
+	// Calculate Drive Turn output due to Joystick X input
+	if (nJoyY >= 0) {
+		// Forward
+		nMotPremixL = (nJoyX >= 0) ? 127.0 : (127.0 + nJoyX);
+		nMotPremixR = (nJoyX >= 0) ? (127.0 - nJoyX) : 127.0;
+	}
+	else {
+		// Reverse
+		nMotPremixL = (nJoyX >= 0) ? (127.0 - nJoyX) : 127.0;
+		nMotPremixR = (nJoyX >= 0) ? 127.0 : (127.0 + nJoyX);
+	}
+
+	// Scale Drive output due to Joystick Y input (throttle)
+	nMotPremixL = nMotPremixL * nJoyY / 127.0;
+	nMotPremixR = nMotPremixR * nJoyY / 127.0;
+
+	// Now calculate pivot amount
+	// - Strength of pivot (nPivSpeed) based on Joystick X input
+	// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
+	nPivSpeed = nJoyX;
+	fPivScale = (abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit);
+
+	// Calculate final mix of Drive and Pivot
+	o_m1 = (1.0 - fPivScale)*nMotPremixL + fPivScale * (nPivSpeed);
+	o_m2 = (1.0 - fPivScale)*nMotPremixR + fPivScale * (-nPivSpeed);
+}
+
+
+void alg2(int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2)
+{
+	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
+	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
+	int32_t nPivSpeed;      // Pivot Speed                          (-128..+127)
+	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
+	float fPivBearLimit = 75.0;
+
+
+	// Calculate Drive Turn output due to Joystick X input
+	if (nJoyY >= 0) {
+		// Forward
+		nMotPremixL = (nJoyX >= 0) ? 127.0 : (127.0 + nJoyX);
+		nMotPremixR = (nJoyX >= 0) ? (127.0 - nJoyX) : 127.0;
+	}
+	else {
+		// Reverse
+		nMotPremixL = (nJoyX >= 0) ? (127.0 - nJoyX) : 127.0;
+		nMotPremixR = (nJoyX >= 0) ? 127.0 : (127.0 + nJoyX);
+	}
+
+	// Scale Drive output due to Joystick Y input (throttle)
+	nMotPremixL = nMotPremixL * nJoyY / 127.0;
+	nMotPremixR = nMotPremixR * nJoyY / 127.0;
+
+	nPivSpeed = nJoyX;
+	float fBearMag;
+	if (nJoyY == 0) {
+		// Handle special case of Y-axis=0
+		if (nJoyX == 0) {
+			fBearMag = 0;
+		}
+		else {
+			fBearMag = 90;
+		}
+	}
+	else {
+		// Bearing (magnitude) away from the Y-axis is calculated based on the
+		// Joystick X & Y input. The arc-tangent angle is then converted
+		// from radians to degrees.
+		fBearMag = atan((float)abs(nJoyX) / (float)abs(nJoyY)) * 90.0 / (3.14159 / 2.0);
+	}
+
+	// Blending of pivot vs drive (fPivScale) based on Joystick bearing
+	fPivScale = (fBearMag < fPivBearLimit) ? 0.0 : (fBearMag - fPivBearLimit) / (90.0 - fPivBearLimit);
+
+	// Calculate final mix of Drive and Pivot
+	o_m1 = (1.0 - fPivScale)*nMotPremixL + fPivScale * (nPivSpeed);
+	o_m2 = (1.0 - fPivScale)*nMotPremixR + fPivScale * (-nPivSpeed);
+}
 
 void loop()
 {
@@ -174,22 +270,8 @@ void loop()
 	static unsigned long lastRecievedTime = millis();
 	static Payload recieved_data;
 
-	static int i = 3000;
-	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
-	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
-	int     nPivSpeed;      // Pivot Speed                          (-128..+127)
-	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
-	float   fPivYLimit = 10.0;
-
-
-
-	// INPUTS
-	int     nJoyX;              // Joystick X input                     (-128..+127)
-	int     nJoyY;              // Joystick Y input                     (-128..+127)
-
-	// OUTPUTS
-	int     nMotMixL;           // Motor (left)  mixed output           (-128..+127)
-	int     nMotMixR;           // Motor (right) mixed output           (-128..+127)
+	int16_t rMotor = 0;
+	int16_t lMotor = 0;
 
 	while (  radio.available(&pipeNo) )
 	{
@@ -236,40 +318,15 @@ void loop()
 			backLight.turn_off();
 		}
 
-		nJoyY = recieved_data.m_speed;
-		nJoyX = recieved_data.m_steering;
+		/* Calculate motor PWM */
+		alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
 
-		// Calculate Drive Turn output due to Joystick X input
-		if ( nJoyY >= 0 ) {
-			// Forward
-			nMotPremixL = ( nJoyX >= 0 ) ? 127.0 : (127.0 + nJoyX);
-			nMotPremixR = ( nJoyX >= 0 ) ? (127.0 - nJoyX) : 127.0;
-		}
-		else {
-			// Reverse
-			nMotPremixL = ( nJoyX >= 0 ) ? (127.0 - nJoyX) : 127.0;
-			nMotPremixR = ( nJoyX >= 0 ) ? 127.0 : (127.0 + nJoyX);
-		}
+		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, 0, 255 ) )
+			: motorL.forward(map(lMotor, -127, 0, 255, 0));
+		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, 0, 255) )
+			: motorR.forward(map( rMotor, -127, 0, 255, 0) );
 
-		// Scale Drive output due to Joystick Y input (throttle)
-		nMotPremixL = nMotPremixL * nJoyY / 128.0;
-		nMotPremixR = nMotPremixR * nJoyY / 128.0;
-
-		// Now calculate pivot amount
-		// - Strength of pivot (nPivSpeed) based on Joystick X input
-		// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
-		nPivSpeed = nJoyX;
-		fPivScale = ( abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit );
-
-		// Calculate final mix of Drive and Pivot
-		nMotMixL = (1.0 - fPivScale)*nMotPremixL + fPivScale * (nPivSpeed);
-		nMotMixR = (1.0 - fPivScale)*nMotPremixR + fPivScale * (-nPivSpeed);
-
-		(nMotMixL > 0) ? motorL.backward( map( nMotMixL, 0, 127, 0, 255 )) 
-			: motorL.forward(map(nMotMixL, -127, 0, 255, 0));
-		(nMotMixR > 0) ? motorR.backward( map( nMotMixR, 0, 127, 0, 255)) 
-			: motorR.forward(map(nMotMixR, -127, 0, 255, 0));
-		
+	/************************************************************************/
 		/*
 		if (recieved_data.m_j4 > 0)
 		{
