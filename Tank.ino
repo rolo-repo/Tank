@@ -173,7 +173,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 , int16_t &o_m2 )
 	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
 	int32_t nPivSpeed;      // Pivot Speed                          (-128..+127)
 	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
-	float   fPivYLimit = 35.0; //should be more or less equal to dead zone of motor
+	float   fPivYLimit = 35; //should be more or less equal to dead zone of motor
 
 	// INPUTS
 	//int32_t     nJoyX;              // Joystick X input                     (-128..+127)
@@ -202,7 +202,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 , int16_t &o_m2 )
 	// Now calculate pivot amount
 	// - Strength of pivot (nPivSpeed) based on Joystick X input
 	// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
-	nPivSpeed = nJoyX;
+	nPivSpeed = constrain(nJoyX, -40, 40);
 	fPivScale = (abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit);
 
 	// Calculate final mix of Drive and Pivot
@@ -211,7 +211,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 , int16_t &o_m2 )
 }
 
 
-void alg2(int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2)
+void alg2( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2 )
 {
 	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
 	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
@@ -219,7 +219,7 @@ void alg2(int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2)
 	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
 	float fPivBearLimit = 75.0;
 
-
+	
 	// Calculate Drive Turn output due to Joystick X input
 	if (nJoyY >= 0) {
 		// Forward
