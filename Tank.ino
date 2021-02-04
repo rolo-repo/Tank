@@ -1,4 +1,4 @@
-/*
+﻿/*
     Name:       Tank.ino
     Created:	03-Jan-21 11:28:49
     Author:     NTNET\ROMANL
@@ -14,6 +14,7 @@
 #include "Led.h"
 
 #include "SerialOutput.h"
+#include "TimeManager.h"
 /*
 0	pulled up	OK	outputs PWM signal at boot
 1	TX pin	OK	debug output at boot
@@ -87,11 +88,106 @@ Led stsLed(ledPin);
 BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, []() { backLight.turn_on(Led::Brightness::_100); });
 BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() { backLight.turn_on(Led::Brightness::_100); });
 
+arduino::utils::Timer timer("timer");
+
 //RF24 radio(_SS , _SCN );
 //ce, csn
 RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
 
 //26,13,15,12,23,27,28,9,10,11,7,8
+//volatile uint64_t counterR = 0 ;
+//volatile uint64_t counterL = 0;
+int varibale = 1;
+
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
+class encCounter {
+public:
+	encCounter( PIN i_pin) : m_pin ( i_pin ){
+	}
+
+	uint64_t update( int i_direction = 1 ) {
+		bool curState = digitalRead( m_pin );
+		
+		if ( m_lastState != curState ) {
+			 m_lastState = curState;
+			if ( curState ) {             
+				m_counter += i_direction;
+			}
+		}
+
+		return m_counter;
+	}
+
+	void reset() {
+		m_counter = 0; 
+	}
+
+	uint64_t get() const {
+		return m_counter;
+	}
+
+private:
+	bool m_lastState = 0;
+	uint64_t m_counter = 0;
+	PIN  m_pin;
+	
+};
+
+encCounter counterR( motorRSpdPin );
+encCounter counterL( motorLSpdPin );
+
+void IRAM_ATTR encMotor() {
+	static uint64_t lastItr = micros();
+
+	if ( micros() - lastItr >= varibale ){
+		portENTER_CRITICAL_ISR(&mux);
+		counterR.update();
+		counterL.update();
+		portEXIT_CRITICAL_ISR(&mux);
+		lastItr = micros();
+	}
+}
+
+/*
+int filter(int newVal) {
+	_buf[_count] = newVal;
+	if (++_count >= 3) _count = 0;
+	int middle = 0;
+	if ((_buf[0] <= _buf[1]) && (_buf[0] <= _buf[2])) {
+		middle = (_buf[1] <= _buf[2]) ? _buf[1] : _buf[2];
+	}
+	else {
+		if ((_buf[1] <= _buf[0]) && (_buf[1] <= _buf[2])) {
+			middle = (_buf[0] <= _buf[2]) ? _buf[0] : _buf[2];
+		}
+		else {
+			middle = (_buf[0] <= _buf[1]) ? _buf[0] : _buf[1];
+		}
+	}
+	_middle_f += (middle - _middle_f) * 0.7;
+	return _middle_f;
+}
+*/
+
+/*
+input from speed
+setpoint needed value
+kp any value
+ki any value
+kd any value
+dt - time period the function called
+minout - min
+maxOut - max
+*/
+int32_t computePID(float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
+	float err = setpoint - input;
+	static float integral = 0, prevErr = 0;
+	integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
+	float D = (err - prevErr) / dt;
+	prevErr = err;
+	return constrain(err * kp + integral + D * kd, minOut, maxOut);
+}
 
 void setup()
 {
@@ -125,27 +221,61 @@ void setup()
 	motorL.begin();
 
 	delay(1000);
+
+	//If slot is closed high if open low.
+	pinMode(motorLSpdReadPin, INPUT_PULLUP );
+	pinMode(motorRSpdReadPin, INPUT_PULLUP );
+
+	attachInterrupt( digitalPinToInterrupt(motorLSpdReadPin), encMotor, FALLING );
+	attachInterrupt( digitalPinToInterrupt(motorRSpdReadPin), encMotor, FALLING );
+
+	timer.addRecuringTask( TIME.getEpochTime() , 1, [](long&) {
+		portENTER_CRITICAL_ISR(&mux);
+		LOG_MSG("L : " << ( unsigned  long )counterL.update() << " R: " << (unsigned long) counterR.update());
+		
+		counterL.reset();
+		counterR.reset();
+
+		portEXIT_CRITICAL_ISR(&mux); }
+	);
+
+
+	timer.addRecuringTask(TIME.getEpochTime(), 1, [](long&) {
+		static uint64_t dt = millis();
+		float kp = 2.0;
+		float ki = 0.9;
+		float kd = 0.1;
+
+		if ( motorR.getSpeed() == motorL.getSpeed() )
+		{
+			if ( counterR.get() < counterL.get() )
+			{
+				if (motorR.getDirection() == Motor::Direction::FORWARD)
+					motorR.forward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+				if (motorR.getDirection() == Motor::Direction::BACKWARD)
+					motorR.backward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+			}
+			else if ( counterR.get() > counterL.get() )
+			{
+				if (motorL.getDirection() == Motor::Direction::FORWARD)
+					motorL.forward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+				if (motorL.getDirection() == Motor::Direction::BACKWARD)
+					motorL.backward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+			}
+		}
+
+		dt = millis();
+	}
+	);
 	
+
 	LOG_MSG("Ready");
 }
-/*
-input from speed
-setpoint needed value
-kp any value
-ki any value
-kd any value
-dt - time period the function called
-minout - min
-maxOut - max
-*/
-int32_t computePID( float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut ) {
-	float err = setpoint - input;
-	static float integral = 0, prevErr = 0;
-	integral = constrain( integral + (float)err * dt * ki, minOut, maxOut );
-	float D = (err - prevErr) / dt;
-	prevErr = err;
-	return constrain( err * kp + integral + D * kd, minOut, maxOut );
-}
+
+
+
+
+
 
 long map(const long x, const long in_min, const long in_max, const long out_min, const long out_max)
 {
@@ -167,7 +297,7 @@ long map(const long x, const long in_min, const long in_max, const long out_min,
 		return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 , int16_t &o_m2 )
+void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R*/)
 {
 	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
 	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
@@ -265,13 +395,16 @@ void alg2( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2 )
 void loop()
 {
 	using namespace arduino::utils;
-	
+	static uint64_t t = millis();
 	byte pipeNo;
 	static unsigned long lastRecievedTime = millis();
 	static Payload recieved_data;
 
 	int16_t rMotor = 0;
 	int16_t lMotor = 0;
+
+	TIME.run();
+	timer.run();
 
 	while (  radio.available(&pipeNo) )
 	{
@@ -284,7 +417,7 @@ void loop()
 		}
 
 		stsLed.blynk();
-
+		
 		LOG_MSG( F("RCV : ")  
 			<< F(" j0 ") << recieved_data.m_j[0]
 			<< F(" j1 ") << recieved_data.m_j[1]
@@ -295,6 +428,8 @@ void loop()
 			<< F(" ") << recieved_data.m_b3
 			<< F(" ") << recieved_data.m_b4);
 		
+		
+
 		/*
 		LOG_MSG(F("RCV  Speed:") << recieved_data.m_speed
 			<< F(" Direction: ") << ((recieved_data.m_speed > 0) ? F("BACKWARD") : F("FORWARD"))
@@ -305,6 +440,8 @@ void loop()
 			<< F(" ") << recieved_data.m_b3
 			<< F(" ") << recieved_data.m_b4);*/
 
+		
+		
 		lastRecievedTime = millis();
 	
 		if ( recieved_data.m_b3 )
@@ -318,13 +455,22 @@ void loop()
 			backLight.turn_off();
 		}
 
-		/* Calculate motor PWM */
-		alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
+		if (recieved_data.m_b1)
+		{
+			motorL.stop();
+			motorR.stop();
+		}
 
-		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, 0, 255 ) )
-			: motorL.forward(map(lMotor, -127, 0, 255, 0));
-		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, 0, 255) )
-			: motorR.forward(map( rMotor, -127, 0, 255, 0) );
+		if ( ! ( recieved_data.m_b2 | recieved_data.m_b1 ) )
+		{
+			/* Calculate motor PWM */
+			alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
+
+			( lMotor > 0 ) ? motorL.backward( map( lMotor, 0, 127, 0, 255) )
+				: motorL.forward( map( lMotor, -127, 0, 255, 0) );
+			( rMotor > 0 ) ? motorR.backward( map(rMotor, 0, 127, 0, 255) )
+				: motorR.forward( map( rMotor, -127, 0, 255, 0) );
+		}
 
 	/************************************************************************/
 		/*
@@ -339,8 +485,8 @@ void loop()
 		*/
 
 		// Send ack
-		payLoadAck.speed = 10;
-		payLoadAck.batteryLevel = 10;
+		payLoadAck.speed = lMotor;
+		payLoadAck.batteryLevel = lMotor;
 		radio.writeAckPayload(pipeNo, &payLoadAck, sizeof(payLoadAck));
 	}
 
@@ -361,4 +507,7 @@ void loop()
 	}*/
 
 	motorR.run(); motorL.run();
+
+	
+
 }
