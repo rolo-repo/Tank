@@ -85,8 +85,8 @@ Led headLight(headLightPin);
 Led backLight(backLightPin);
 Led stsLed(ledPin);
 
-BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, []() { backLight.turn_on(Led::Brightness::_100); });
-BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() { backLight.turn_on(Led::Brightness::_100); });
+BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, []() { backLight.turn_on(Led::Brightness::_100); } , 110 );
+BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() { backLight.turn_on(Led::Brightness::_100); } , 110 );
 
 arduino::utils::Timer timer("timer");
 
@@ -103,50 +103,67 @@ portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 
 class encCounter {
 public:
-	encCounter( PIN i_pin) : m_pin ( i_pin ){
+	encCounter( PIN i_pin) : m_pin ( i_pin ) {
+		dt = millis();
 	}
 
-	uint64_t update( int i_direction = 1 ) {
-		bool curState = digitalRead( m_pin );
+
+
+	void reset() volatile  {
+		m_counter = 0; 
 		
-		if ( m_lastState != curState ) {
-			 m_lastState = curState;
-			if ( curState ) {             
-				m_counter += i_direction;
+	}
+
+	uint64_t get() volatile const {
+		return m_counter;
+	}
+
+	void filter(int newVal) volatile {
+		
+		m_buf[ ++m_count % SIZE_OF_ARR(m_buf)] = newVal;
+
+		uint32_t middle = 0;
+		
+		for ( uint16_t i = 0 ; i < SIZE_OF_ARR(m_buf) ; i++ ) {
+			middle += m_buf[i];
+		}
+
+		m_counter = middle / SIZE_OF_ARR(m_buf);
+	}
+
+	uint64_t update(int i_direction = 1)  volatile {
+		bool curState = digitalRead(m_pin);
+
+		if ( millis() - dt  > 10 && m_lastState != curState) {
+			dt = millis();
+			m_lastState = curState;
+			if (!curState) {
+				filter( m_counter += i_direction );
 			}
 		}
 
 		return m_counter;
 	}
 
-	void reset() {
-		m_counter = 0; 
-	}
-
-	uint64_t get() const {
-		return m_counter;
-	}
-
 private:
 	bool m_lastState = 0;
 	uint64_t m_counter = 0;
+	uint16_t m_buf[3] = { 0,0,0 };
+	uint16_t m_count = 0;
 	PIN  m_pin;
+	uint64_t dt = 0;
+
 	
 };
 
-encCounter counterR( motorRSpdPin );
-encCounter counterL( motorLSpdPin );
+volatile encCounter counterR( motorRSpdPin );
+volatile encCounter counterL( motorLSpdPin );
 
 void IRAM_ATTR encMotor() {
-	static uint64_t lastItr = micros();
-
-	if ( micros() - lastItr >= varibale ){
-		portENTER_CRITICAL_ISR(&mux);
-		counterR.update();
-		counterL.update();
-		portEXIT_CRITICAL_ISR(&mux);
-		lastItr = micros();
-	}
+	portENTER_CRITICAL_ISR(&mux);
+	counterR.update();
+	counterL.update();
+	portEXIT_CRITICAL_ISR(&mux);
 }
 
 /*
@@ -223,15 +240,15 @@ void setup()
 	delay(1000);
 
 	//If slot is closed high if open low.
-	pinMode(motorLSpdReadPin, INPUT_PULLUP );
-	pinMode(motorRSpdReadPin, INPUT_PULLUP );
+	pinMode(motorLSpdReadPin, INPUT );
+	pinMode(motorRSpdReadPin, INPUT );
 
 	attachInterrupt( digitalPinToInterrupt(motorLSpdReadPin), encMotor, FALLING );
-	attachInterrupt( digitalPinToInterrupt(motorRSpdReadPin), encMotor, FALLING );
+	attachInterrupt( digitalPinToInterrupt(motorRSpdReadPin), encMotor, FALLING);
 
 	timer.addRecuringTask( TIME.getEpochTime() , 1, [](long&) {
 		portENTER_CRITICAL_ISR(&mux);
-		LOG_MSG("L : " << ( unsigned  long )counterL.update() << " R: " << (unsigned long) counterR.update());
+		LOG_MSG("L : " << ( unsigned  long )counterL.get() << " R: " << (unsigned long) counterR.get());
 		
 		counterL.reset();
 		counterR.reset();
@@ -245,24 +262,30 @@ void setup()
 		float kp = 2.0;
 		float ki = 0.9;
 		float kd = 0.1;
-
+		portENTER_CRITICAL_ISR(&mux);
 		if ( motorR.getSpeed() == motorL.getSpeed() )
 		{
 			if ( counterR.get() < counterL.get() )
 			{
+				uint16_t speed = computePID(0, motorL.getSpeed() / counterL.get(), kp, ki, kd, (millis() - dt) / 1000, 0, 255) *  counterL.get();
 				if (motorR.getDirection() == Motor::Direction::FORWARD)
-					motorR.forward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+					motorR.forward(speed );
 				if (motorR.getDirection() == Motor::Direction::BACKWARD)
-					motorR.backward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+					motorR.backward( speed );
+				LOG_MSG("1 " << speed);
 			}
 			else if ( counterR.get() > counterL.get() )
 			{
+				uint16_t speed = computePID(0, motorL.getSpeed() / counterR.get(), kp, ki, kd, (millis() - dt) / 1000, 0, 255) *  counterR.get();
+
 				if (motorL.getDirection() == Motor::Direction::FORWARD)
-					motorL.forward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+					motorL.forward(speed );
 				if (motorL.getDirection() == Motor::Direction::BACKWARD)
-					motorL.backward(computePID(0, motorL.getSpeed(), kp, ki, kd, (millis() - dt) / 1000, 0, 255));
+					motorL.backward(speed );
+				LOG_MSG("2 "<<speed);
 			}
 		}
+		portEXIT_CRITICAL_ISR(&mux);
 
 		dt = millis();
 	}
@@ -332,7 +355,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 	// Now calculate pivot amount
 	// - Strength of pivot (nPivSpeed) based on Joystick X input
 	// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
-	nPivSpeed = constrain(nJoyX, -40, 40);
+	nPivSpeed = constrain(nJoyX, -64, 64 );
 	fPivScale = (abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit);
 
 	// Calculate final mix of Drive and Pivot
@@ -466,10 +489,10 @@ void loop()
 			/* Calculate motor PWM */
 			alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
 
-			( lMotor > 0 ) ? motorL.backward( map( lMotor, 0, 127, 0, 255) )
-				: motorL.forward( map( lMotor, -127, 0, 255, 0) );
-			( rMotor > 0 ) ? motorR.backward( map(rMotor, 0, 127, 0, 255) )
-				: motorR.forward( map( rMotor, -127, 0, 255, 0) );
+			( lMotor > 0 ) ? motorL.backward( map( lMotor, 0, 127, 100, 255) )
+				: motorL.forward( map( lMotor, -127, 0, 255, 100) );
+			( rMotor > 0 ) ? motorR.backward( map(rMotor, 0, 127, 100, 255) )
+				: motorR.forward( map( rMotor, -127, 0, 255, 100) );
 		}
 
 	/************************************************************************/
