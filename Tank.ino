@@ -12,9 +12,12 @@
 #include "BTS7960.h"
 #include "RFcom.h"
 #include "Led.h"
+#include "ScopedGuard.h"
+
 
 #include "SerialOutput.h"
 #include "TimeManager.h"
+
 /*
 0	pulled up	OK	outputs PWM signal at boot
 1	TX pin	OK	debug output at boot
@@ -65,12 +68,12 @@ constexpr PIN motorEnablePin = 26;
 constexpr PIN motorLFrdPin = 25; //INT0
 constexpr PIN motorLSpdPin = 26; //PWM //INT1
 constexpr PIN motorLBwdPin = 27;
-constexpr PIN motorLSpdReadPin = 34;
+constexpr PIN motorLSpdReadPin = 35;
 
 constexpr PIN motorRFrdPin = 16; //INT0
 constexpr PIN motorRSpdPin = 4;; //PWM //INT1 
 constexpr PIN motorRBwdPin = 17;
-constexpr PIN motorRSpdReadPin = 35;
+constexpr PIN motorRSpdReadPin = 34;
 
 constexpr PIN headLightPin = 14;
 constexpr PIN backLightPin = 15;
@@ -90,6 +93,8 @@ BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() { backLigh
 
 arduino::utils::Timer timer("timer");
 
+hw_timer_t * hr_timer = NULL;
+
 //RF24 radio(_SS , _SCN );
 //ce, csn
 RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
@@ -99,93 +104,89 @@ RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
 //volatile uint64_t counterL = 0;
 int varibale = 1;
 
-portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE mux_l = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE mux_r = portMUX_INITIALIZER_UNLOCKED;
+volatile SemaphoreHandle_t timerSemaphore;
 
 class encCounter {
 public:
-	encCounter( PIN i_pin) : m_pin ( i_pin ) {
-		dt = millis();
+	encCounter( PIN i_pin ) : m_pin ( i_pin ) {
 	}
 
-
-
-	void reset() volatile  {
-		m_counter = 0; 
-		
-	}
-
-	uint64_t get() volatile const {
-		return m_counter;
-	}
-
-	void filter(int newVal) volatile {
-		
-		m_buf[ ++m_count % SIZE_OF_ARR(m_buf)] = newVal;
-
-		uint32_t middle = 0;
-		
-		for ( uint16_t i = 0 ; i < SIZE_OF_ARR(m_buf) ; i++ ) {
-			middle += m_buf[i];
-		}
-
-		m_counter = middle / SIZE_OF_ARR(m_buf);
-	}
-
-	uint64_t update(int i_direction = 1)  volatile {
-		bool curState = digitalRead(m_pin);
-
-		if ( millis() - dt  > 10 && m_lastState != curState) {
-			dt = millis();
-			m_lastState = curState;
-			if (!curState) {
-				filter( m_counter += i_direction );
-			}
-		}
-
-		return m_counter;
-	}
-
-private:
-	bool m_lastState = 0;
-	uint64_t m_counter = 0;
-	uint16_t m_buf[3] = { 0,0,0 };
-	uint16_t m_count = 0;
-	PIN  m_pin;
-	uint64_t dt = 0;
-
-	
-};
-
-volatile encCounter counterR( motorRSpdPin );
-volatile encCounter counterL( motorLSpdPin );
-
-void IRAM_ATTR encMotor() {
-	portENTER_CRITICAL_ISR(&mux);
-	counterR.update();
-	counterL.update();
-	portEXIT_CRITICAL_ISR(&mux);
-}
-
-/*
-int filter(int newVal) {
-	_buf[_count] = newVal;
-	if (++_count >= 3) _count = 0;
-	int middle = 0;
-	if ((_buf[0] <= _buf[1]) && (_buf[0] <= _buf[2])) {
-		middle = (_buf[1] <= _buf[2]) ? _buf[1] : _buf[2];
-	}
-	else {
-		if ((_buf[1] <= _buf[0]) && (_buf[1] <= _buf[2])) {
-			middle = (_buf[0] <= _buf[2]) ? _buf[0] : _buf[2];
+	unsigned long calcRPM() volatile {
+		if ( m_counter != 0) {
+			return (60000 / ( dt * 4 ) );
 		}
 		else {
-			middle = (_buf[0] <= _buf[1]) ? _buf[0] : _buf[1];
+			return 0;
 		}
 	}
-	_middle_f += (middle - _middle_f) * 0.7;
-	return _middle_f;
+
+	uint64_t update() volatile {
+	//	bool curState = digitalRead( m_pin ) ;
+		
+		if ( millis() - t > 10 ) {
+			dt = millis() - t;
+			t  = millis();
+
+		//	m_lastState = curState;
+			m_counter++;
+		}
+		return m_counter;
+	}
+
+	String toString() volatile {
+		String res;
+
+		res += "m_counter=";
+		res += (long)m_counter; 
+		res += " rpm ";
+		res += calcRPM();
+
+		return res;
+	}
+
+	bool m_lastState = 0;
+	uint64_t m_counter = 0;
+	
+	uint64_t t =  0;
+	uint64_t dt = 0;
+
+private :
+	PIN  m_pin;
+};
+
+volatile encCounter counterL( motorLSpdReadPin );
+volatile encCounter counterR( motorRSpdReadPin );
+
+void IRAM_ATTR encMotorR() {
+
+	portENTER_CRITICAL_ISR(&mux_r);
+	ScopedGuard guard = makeScopedGuard(
+		[]() { portEXIT_CRITICAL_ISR(&mux_r); });
+
+	counterR.update();
 }
-*/
+
+void IRAM_ATTR encMotorL() {
+
+	portENTER_CRITICAL_ISR(&mux_l);
+	ScopedGuard guard = makeScopedGuard(
+		[]() { portEXIT_CRITICAL_ISR(&mux_l); });
+
+	counterL.update();
+}
+
+void IRAM_ATTR onTimer() {
+	// Increment the counter and set the time of ISR
+	/*portENTER_CRITICAL_ISR(&timerMux);
+	isrCounter++;
+	LOG_MSG("Timer " << isrCounter);
+	portEXIT_CRITICAL_ISR(&timerMux);*/
+	// Give a semaphore that we can check in the loop
+	xSemaphoreGiveFromISR(timerSemaphore, NULL);
+	// It is safe to use digitalRead/Write here if you want to toggle an output
+}
 
 /*
 input from speed
@@ -197,7 +198,16 @@ dt - time period the function called
 minout - min
 maxOut - max
 */
-int32_t computePID(float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
+int32_t computePIDR( float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut ) {
+	float err = setpoint - input;
+	static float integral = 0, prevErr = 0;
+	integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
+	float D = (err - prevErr) / dt;
+	prevErr = err;
+	return constrain(err * kp + integral + D * kd, minOut, maxOut);
+}
+
+int32_t computePIDL( float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut ) {
 	float err = setpoint - input;
 	static float integral = 0, prevErr = 0;
 	integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
@@ -208,9 +218,6 @@ int32_t computePID(float input, float setpoint, float kp, float ki, float kd, fl
 
 void setup()
 {
-	//LOG_MSG_BEGIN(115200);
-	//delay(1000);
-
 	radio.begin(); 
 	radio.setAutoAck(1);       
 	radio.setRetries(0, 3 /*0*/);     
@@ -228,7 +235,24 @@ void setup()
 	radio.startListening();  
 	stsLed.turn_on();
 
-	
+	// Create semaphore to inform us when the timer has fired
+	timerSemaphore = xSemaphoreCreateBinary();
+
+	// Use 1st timer of 4 (counted from zero).
+	// Set 80 divider for prescaler (see ESP32 Technical Reference Manual for more
+	// info).
+	hr_timer = timerBegin(0, 80, true);
+
+	// Attach onTimer function to our timer.
+	timerAttachInterrupt( hr_timer, &onTimer, true );
+
+	// Set alarm to call onTimer function every second (value in microseconds).
+	// Repeat the alarm (third parameter)
+	timerAlarmWrite( hr_timer, 100000 , true ); //0.1 sec
+
+	// Start an alarm
+	timerAlarmEnable( hr_timer );
+
 	//analogWriteFrequency(1000);
 	//analogWriteResolution(8);
 	/*ledcSetup( 0, 1000, 8 );
@@ -240,65 +264,76 @@ void setup()
 	delay(1000);
 
 	//If slot is closed high if open low.
-	pinMode(motorLSpdReadPin, INPUT );
-	pinMode(motorRSpdReadPin, INPUT );
+	pinMode( motorLSpdReadPin, INPUT_PULLUP );
+	pinMode( motorRSpdReadPin, INPUT_PULLUP );
 
-	attachInterrupt( digitalPinToInterrupt(motorLSpdReadPin), encMotor, FALLING );
-	attachInterrupt( digitalPinToInterrupt(motorRSpdReadPin), encMotor, FALLING);
-
+	attachInterrupt( digitalPinToInterrupt(motorLSpdReadPin), encMotorL, FALLING);
+	attachInterrupt( digitalPinToInterrupt(motorRSpdReadPin), encMotorR, FALLING);
+	/*
 	timer.addRecuringTask( TIME.getEpochTime() , 1, [](long&) {
 		portENTER_CRITICAL_ISR(&mux);
-		LOG_MSG("L : " << ( unsigned  long )counterL.get() << " R: " << (unsigned long) counterR.get());
 		
+		
+		
+		portEXIT_CRITICAL_ISR(&mux); }
+	);
+	*/
+	/*
+	timer.addRecuringTask(TIME.getEpochTime(), 1, [](long&) {
+		static uint64_t dt = millis();
+		float kp = 0.3; //2.0;
+		float ki = 1 ; ////0.9;
+		float kd = 2 ;// 0.1;
+		portENTER_CRITICAL_ISR(&mux);
+
+		LOG_MSG( "L : " << (unsigned  long)counterL.get() << " R: " << (unsigned long)counterR.get() );
+
+		if ( motorR.getSpeed() == motorL.getSpeed() )
+		{
+			if (  counterL.update()  > 0 )
+			{
+			//	uint16_t speed = motorR.getSpeed() * (counterL.get() - counterR.get()) / (counterL.get() + counterR.get());
+
+				uint16_t speed = computePIDR( counterR.get() , counterL.get(), kp, ki, kd, (float)( millis() - dt ) / 1000.0 , counterL.get() , 255) ;
+				
+				speed = motorR.getSpeed() * ( float )( speed / counterL.get() );
+				
+				if (motorR.getDirection() == Motor::Direction::FORWARD)
+					motorR.forward(speed);
+				if (motorR.getDirection() == Motor::Direction::BACKWARD)
+					motorR.backward(speed);
+				
+				LOG_MSG("1 "  << speed);
+			}
+			else if (counterR.get() > 0 )
+			{
+				//	uint16_t speed = motorR.getSpeed() * (counterR.get() - counterL.get()) / (counterL.get() + counterR.get());
+
+				uint16_t speed = computePIDL( counterL.get(), counterR.get(), kp, ki, kd, (float)(millis() - dt) / 1000.0, counterR.get(), 255);
+
+				speed = motorL.getSpeed() * (float) ( speed /  counterR.get() );
+
+				if (motorL.getDirection() == Motor::Direction::FORWARD)
+					motorL.forward(speed);
+				if (motorL.getDirection() == Motor::Direction::BACKWARD)
+					motorL.backward(speed);
+
+				LOG_MSG("2 " << speed);
+			}
+		}
+
 		counterL.reset();
 		counterR.reset();
 
-		portEXIT_CRITICAL_ISR(&mux); }
-	);
-
-
-	timer.addRecuringTask(TIME.getEpochTime(), 1, [](long&) {
-		static uint64_t dt = millis();
-		float kp = 2.0;
-		float ki = 0.9;
-		float kd = 0.1;
-		portENTER_CRITICAL_ISR(&mux);
-		if ( motorR.getSpeed() == motorL.getSpeed() )
-		{
-			if ( counterR.get() < counterL.get() )
-			{
-				uint16_t speed = computePID(0, motorL.getSpeed() / counterL.get(), kp, ki, kd, (millis() - dt) / 1000, 0, 255) *  counterL.get();
-				if (motorR.getDirection() == Motor::Direction::FORWARD)
-					motorR.forward(speed );
-				if (motorR.getDirection() == Motor::Direction::BACKWARD)
-					motorR.backward( speed );
-				LOG_MSG("1 " << speed);
-			}
-			else if ( counterR.get() > counterL.get() )
-			{
-				uint16_t speed = computePID(0, motorL.getSpeed() / counterR.get(), kp, ki, kd, (millis() - dt) / 1000, 0, 255) *  counterR.get();
-
-				if (motorL.getDirection() == Motor::Direction::FORWARD)
-					motorL.forward(speed );
-				if (motorL.getDirection() == Motor::Direction::BACKWARD)
-					motorL.backward(speed );
-				LOG_MSG("2 "<<speed);
-			}
-		}
 		portEXIT_CRITICAL_ISR(&mux);
 
 		dt = millis();
 	}
 	);
-	
+	*/
 
 	LOG_MSG("Ready");
 }
-
-
-
-
-
 
 long map(const long x, const long in_min, const long in_max, const long out_min, const long out_max)
 {
@@ -363,8 +398,202 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 	o_m2 = (1.0 - fPivScale)*nMotPremixR + fPivScale * (-nPivSpeed);
 }
 
+void handlePID() {
+	
+	float kp = 0.05; //2.0;
+	float ki = 0.01; ////0.9;
+	float kd = 0.02;// 0.1;
+	portENTER_CRITICAL_ISR(&mux_l);
 
-void alg2( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2 )
+	ScopedGuard guard = makeScopedGuard([]() { 
+		if ( counterL.m_counter != 0 ){
+			LOG_MSG("L: " << (long)counterL.dt  << " "  << counterL.toString())
+			
+		}
+		counterL.m_counter = 0;
+	
+		portEXIT_CRITICAL_ISR(&mux_l);
+	});
+
+	portENTER_CRITICAL_ISR(&mux_r);
+	ScopedGuard guard1 = makeScopedGuard([]() {
+		if (counterR.m_counter != 0) {
+			LOG_MSG("R: " << (long)counterR.dt << " " << counterR.toString() );
+			counterR.m_counter = 0;
+		}
+      portEXIT_CRITICAL_ISR(&mux_r);
+
+	});
+
+	if ( !counterL.m_counter && !counterR.m_counter ) {
+		return;
+	}
+
+	if ( motorL.getSpeed() != 0 && motorL.getSpeed() == motorR.getSpeed() )
+	{
+		if ( 0 == counterR.m_counter ) {
+			LOG_MSG("Boost right");
+			uint16_t speed = motorR.getSpeed();
+
+			if (motorR.getDirection() == Motor::Direction::FORWARD)
+				motorR.forward( speed + 0.1 * speed );
+			if (motorR.getDirection() == Motor::Direction::BACKWARD)
+				motorR.backward( speed + 0.1 * speed );
+
+			delay(25);
+
+			if (motorR.getDirection() == Motor::Direction::FORWARD)
+				motorR.forward(speed);
+			if (motorR.getDirection() == Motor::Direction::BACKWARD)
+				motorR.backward(speed);
+
+		}
+
+		if ( 0 == counterL.m_counter ) {
+
+			LOG_MSG("Boost left");
+			uint16_t speed = motorL.getSpeed();
+
+			if (motorL.getDirection() == Motor::Direction::FORWARD)
+				motorL.forward(speed + 0.1 * speed);
+			if (motorL.getDirection() == Motor::Direction::BACKWARD)
+				motorL.backward(speed + 0.1 * speed);
+
+			delay(25);
+
+			if (motorL.getDirection() == Motor::Direction::FORWARD)
+				motorL.forward(speed);
+			if (motorL.getDirection() == Motor::Direction::BACKWARD)
+				motorL.backward(speed);
+		}
+	}
+
+		
+
+	//float rouds_per_secR = (float) ( counterR.m_counter / 4.0 ) / 0.5;
+	//float rouds_per_secL = (float) ( counterL.m_counter / 4.0 ) / 0.5;
+
+
+	//int32_t pwmR = computePIDR( rouds_per_secR, rouds_per_secL , kp, ki, kd, 0.5 , 0 , 255 );
+	//int32_t pwmL = computePIDL( rouds_per_secL, rouds_per_secR , kp, ki, kd, 0.5 , 0 , 255 );
+
+	//LOG_MSG( "L : " << (float)rouds_per_secL << " R: " << (float)rouds_per_secR );
+	
+}
+
+
+void loop()
+{
+	using namespace arduino::utils;
+	static uint64_t t = millis();
+	byte pipeNo;
+	static unsigned long lastRecievedTime = millis();
+	static Payload recieved_data;
+	static Payload pre_recieved_data;
+
+	int16_t rMotor = 0;
+	int16_t lMotor = 0;
+
+	TIME.run();
+	timer.run();
+	motorR.run(); 
+	motorL.run();
+
+	if ( xSemaphoreTake( timerSemaphore, 0 ) == pdTRUE ) {
+		//adjust the speed
+		handlePID();
+	}
+
+	while (  radio.available(&pipeNo) )
+	{
+		radio.read(&recieved_data, sizeof(recieved_data));
+
+		if (!recieved_data.isValid()) {
+			LOG_MSG(F("Garbage on RF") );
+			continue;
+		}
+
+		lastRecievedTime = millis();
+		
+        if ( pre_recieved_data == recieved_data ) {
+			continue;
+		}
+		
+		pre_recieved_data = recieved_data;
+
+		LOG_MSG( F("RCV : ")  
+			<< F(" j0 ") << recieved_data.m_j[0]
+			<< F(" j1 ") << recieved_data.m_j[1]
+			<< F(" j2 ") << recieved_data.m_j[2]
+			<< F(" j3 ") << recieved_data.m_j[3]
+			<< F(" Bits ") << recieved_data.m_b1
+			<< F(" ") << recieved_data.m_b2
+			<< F(" ") << recieved_data.m_b3
+			<< F(" ") << recieved_data.m_b4);
+
+		if ( recieved_data.m_b3 ) {
+			headLight.turn_on(Led::Brightness::_100);
+			backLight.turn_on(Led::Brightness::_100);
+		}
+		else
+		{
+			headLight.turn_off();
+			backLight.turn_off();
+		}
+
+		if (recieved_data.m_b1) {
+			motorL.stop();
+			motorR.stop();
+		}
+
+		/* Calculate motor PWM */
+		alg1( -recieved_data.m_steering , recieved_data.m_speed, lMotor, rMotor );
+
+		if (motorL.getSpeed() != lMotor || rMotor != motorR.getSpeed() ) {
+			( lMotor > 0 ) ? motorL.backward( map( lMotor, 0, 127, 100, 255) )
+				: motorL.forward( map( lMotor, -127, 0, 255, 100) );
+			( rMotor > 0 ) ? motorR.backward( map(rMotor, 0, 127, 100, 255) )
+				: motorR.forward( map( rMotor, -127, 0, 255, 100) );
+		}
+
+	/************************************************************************/
+		/*
+		if (recieved_data.m_j4 > 0)
+		{
+			turret.right(map(recieved_data.m_j4, 0, 127, 0, 255));
+		}
+		else
+		{
+			turret.left(map(recieved_data.m_j4, -127, 0, 255, 0));
+		}
+		*/
+
+		// Send ack
+		payLoadAck.speed = lMotor;
+		payLoadAck.batteryLevel = lMotor;
+		radio.writeAckPayload(pipeNo, &payLoadAck, sizeof(payLoadAck));
+	}
+
+	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS ) {
+		LOG_MSG("Lost connection");
+		stsLed.blynk();
+
+		motorR.stop(); motorL.stop();
+
+		headLight.fade(500);
+
+		lastRecievedTime = millis();
+	}
+
+	/*if ( ! radio.isChipConnected() ) {
+		RESET();
+	}*/
+}
+
+
+/*
+
+void alg2(int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2)
 {
 	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
 	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
@@ -372,7 +601,7 @@ void alg2( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2 )
 	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
 	float fPivBearLimit = 75.0;
 
-	
+
 	// Calculate Drive Turn output due to Joystick X input
 	if (nJoyY >= 0) {
 		// Forward
@@ -415,122 +644,4 @@ void alg2( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1, int16_t &o_m2 )
 	o_m2 = (1.0 - fPivScale)*nMotPremixR + fPivScale * (-nPivSpeed);
 }
 
-void loop()
-{
-	using namespace arduino::utils;
-	static uint64_t t = millis();
-	byte pipeNo;
-	static unsigned long lastRecievedTime = millis();
-	static Payload recieved_data;
-
-	int16_t rMotor = 0;
-	int16_t lMotor = 0;
-
-	TIME.run();
-	timer.run();
-
-	while (  radio.available(&pipeNo) )
-	{
-		radio.read(&recieved_data, sizeof(recieved_data));
-
-		if (!recieved_data.isValid())
-		{
-			LOG_MSG(F("Garbage on RF") );
-			continue;
-		}
-
-		stsLed.blynk();
-		
-		LOG_MSG( F("RCV : ")  
-			<< F(" j0 ") << recieved_data.m_j[0]
-			<< F(" j1 ") << recieved_data.m_j[1]
-			<< F(" j2 ") << recieved_data.m_j[2]
-			<< F(" j3 ") << recieved_data.m_j[3]
-			<< F(" Bits ") << recieved_data.m_b1
-			<< F(" ") << recieved_data.m_b2
-			<< F(" ") << recieved_data.m_b3
-			<< F(" ") << recieved_data.m_b4);
-		
-		
-
-		/*
-		LOG_MSG(F("RCV  Speed:") << recieved_data.m_speed
-			<< F(" Direction: ") << ((recieved_data.m_speed > 0) ? F("BACKWARD") : F("FORWARD"))
-			<< F(" Steering: ") << recieved_data.m_steering
-			<< ((recieved_data.m_steering > 0) ? F(" LEFT") : F(" RIGHT"))
-			<< F(" Bits ") << recieved_data.m_b1
-			<< F(" ") << recieved_data.m_b2
-			<< F(" ") << recieved_data.m_b3
-			<< F(" ") << recieved_data.m_b4);*/
-
-		
-		
-		lastRecievedTime = millis();
-	
-		if ( recieved_data.m_b3 )
-		{
-			headLight.turn_on(Led::Brightness::_100);
-			backLight.turn_on(Led::Brightness::_100);
-		}
-		else
-		{
-			headLight.turn_off();
-			backLight.turn_off();
-		}
-
-		if (recieved_data.m_b1)
-		{
-			motorL.stop();
-			motorR.stop();
-		}
-
-		if ( ! ( recieved_data.m_b2 | recieved_data.m_b1 ) )
-		{
-			/* Calculate motor PWM */
-			alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
-
-			( lMotor > 0 ) ? motorL.backward( map( lMotor, 0, 127, 100, 255) )
-				: motorL.forward( map( lMotor, -127, 0, 255, 100) );
-			( rMotor > 0 ) ? motorR.backward( map(rMotor, 0, 127, 100, 255) )
-				: motorR.forward( map( rMotor, -127, 0, 255, 100) );
-		}
-
-	/************************************************************************/
-		/*
-		if (recieved_data.m_j4 > 0)
-		{
-			turret.right(map(recieved_data.m_j4, 0, 127, 0, 255));
-		}
-		else
-		{
-			turret.left(map(recieved_data.m_j4, -127, 0, 255, 0));
-		}
-		*/
-
-		// Send ack
-		payLoadAck.speed = lMotor;
-		payLoadAck.batteryLevel = lMotor;
-		radio.writeAckPayload(pipeNo, &payLoadAck, sizeof(payLoadAck));
-	}
-
-	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS )
-	{
-		LOG_MSG("Lost connection");
-		stsLed.blynk();
-
-		motorR.stop(); motorL.stop();
-
-		headLight.fade(500);
-
-		lastRecievedTime = millis();
-	}
-
-	/*if ( ! radio.isChipConnected() ) {
-		RESET();
-	}*/
-
-	motorR.run(); motorL.run();
-
-	
-
-}
+*/
