@@ -3,10 +3,15 @@
     Created:	03-Jan-21 11:28:49
     Author:     NTNET\ROMANL
 */
-#define  ENABLE_LOGGER
+
 #include "SPI.h"
 #include "RF24.h"
 #include "nRF24L01.h"
+
+#include "DFRobotDFPlayerMini.h"
+#include "Adafruit_PWMServoDriver.h"
+
+#define  ENABLE_LOGGER
 
 #include "Constants.h"
 #include "BTS7960.h"
@@ -20,9 +25,9 @@
 
 /*
 0	pulled up	OK	outputs PWM signal at boot
-1	TX pin	OK	debug output at boot
-2	OK	OK	connected to on-board LED                 
-3	OK	RX pin	HIGH at boot
+1   TX
+2	OK	OK	M2
+3   RX
 4	OK	OK  M2
 5	OK	OK	outputs PWM signal at boot  -  SS
 6	x	x	connected to the integrated SPI flash
@@ -31,12 +36,12 @@
 9	x	x	connected to the integrated SPI flash
 10	x	x	connected to the integrated SPI flash
 11	x	x	connected to the integrated SPI flash
-12	OK	OK	boot fail if pulled high
+12	OK	OK	boot fail if pulled high  - M2
 13	OK	OK  SCN
 14	OK	OK	outputs PWM signal at boot  - HL
 15	OK	OK	outputs PWM signal at boot  - BL
-16	OK	OK  M2
-17	OK	OK  M2
+16	OK	OK  TX2
+17	OK	OK  RX2
 18	OK	OK  SCK
 19	OK	OK  MISO
 21	OK	OK  SDA
@@ -57,39 +62,37 @@
 // SPI
 constexpr PIN _MOSI = 23;
 constexpr PIN _MISO = 19;
-constexpr PIN _SCK = 22;
+constexpr PIN _SCK = 18;
 constexpr PIN _SS = 5;
 constexpr PIN _SCN = 13; //any pin
 
 constexpr PIN _SCL = 22; //I2C
 constexpr PIN _SDA = 21; //I2C
 
-constexpr PIN motorEnablePin = 26;
-constexpr PIN motorLFrdPin = 25; //INT0
+
+constexpr PIN motorLFrdPin = 14; //INT0
 constexpr PIN motorLSpdPin = 26; //PWM //INT1
 constexpr PIN motorLBwdPin = 27;
 constexpr PIN motorLSpdReadPin = 35;
 
-constexpr PIN motorRFrdPin = 16; //INT0
+constexpr PIN motorRFrdPin = 2; //INT0
 constexpr PIN motorRSpdPin = 4;; //PWM //INT1 
-constexpr PIN motorRBwdPin = 17;
+constexpr PIN motorRBwdPin = 12;
 constexpr PIN motorRSpdReadPin = 34;
 
-constexpr PIN headLightPin = 14;
-constexpr PIN backLightPin = 15;
+//constexpr PIN 15;
+
+constexpr PIN audioOutputPin = 25;
 
 constexpr PIN turretLeftPin = 32;
 constexpr PIN turretRightPin = 33;
-constexpr PIN ledPin = 2;
 
 unsigned char address[][6] = { "1Node" }; // pipe address
 
-Led headLight(headLightPin);
-Led backLight(backLightPin);
-Led stsLed(ledPin);
+Adafruit_PWMServoDriver driver = Adafruit_PWMServoDriver();
 
-BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, []() { backLight.turn_on(Led::Brightness::_100); } , 110 );
-BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() { backLight.turn_on(Led::Brightness::_100); } , 110 );
+PCA_Led< Adafruit_PWMServoDriver> headLight( 14, driver );
+PCA_Led< Adafruit_PWMServoDriver> backLight( 15, driver );
 
 arduino::utils::Timer timer("timer");
 
@@ -98,6 +101,8 @@ hw_timer_t * hr_timer = NULL;
 //RF24 radio(_SS , _SCN );
 //ce, csn
 RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
+
+DFRobotDFPlayerMini dfPlayer;
 
 //26,13,15,12,23,27,28,9,10,11,7,8
 //volatile uint64_t counterR = 0 ;
@@ -159,6 +164,83 @@ private :
 volatile encCounter counterL( motorLSpdReadPin );
 volatile encCounter counterR( motorRSpdReadPin );
 
+
+enum SOUND_EFFECTS {	
+	SE_START_ENGINE = 1, 
+	SE_STOP_ENGINE = 2,
+	SE_IDLE_RUN = 3,
+	SE_MOVE_SLOW = 1,
+	SE_MOVE_FAST = 2,
+	SE_BREAK = 3,
+	SE_TURN_TURRET = 1,
+	SE_MOVE_BARREL =2,
+	SE_FIRE = 3,
+	SE_LAST 
+};
+
+
+class SoundEffect {
+
+public:
+	SoundEffect (){
+		m_id = SE_LAST;
+		next = []() {};
+	}
+
+	void run() {
+		if ( dfPlayer.available() ) {
+			switch ( dfPlayer.readType() ) {
+			   case DFPlayerPlayFinished:
+				   next();
+				   break;
+			}				
+		}
+	}
+
+	void playSound(SOUND_EFFECTS i_sound) {
+		if (m_id != i_sound) {
+			LOG_MSG("Play" << i_sound);
+
+			if (m_id == SE_LAST) {
+				dfPlayer.play(i_sound);
+			}
+			else {
+				dfPlayer.stop();
+			}
+
+			m_id = i_sound;
+			next = [=]() { dfPlayer.loop((short)i_sound); };
+		}
+	}
+
+	void playFrontend( SOUND_EFFECTS i_sound )  {
+		if (dfPlayer.available())
+			dfPlayer.advertise(i_sound);
+	}
+
+private:
+	SOUND_EFFECTS m_id;
+
+	typedef std::function<void()> NextPlay;
+	NextPlay next ;
+};
+
+SoundEffect soundEffect;
+void breakHook();
+
+BTS7960_1PWM   motorR(motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, 110);
+BTS7960_1PWM   motorL(motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, 110);
+
+void breakHook()
+{
+	if (motorR.getSpeed() == motorL.getSpeed()) {
+		soundEffect.playSound(SE_BREAK);
+		backLight.turn_on();
+	}
+}
+
+
+
 void IRAM_ATTR encMotorR() {
 
 	portENTER_CRITICAL_ISR(&mux_r);
@@ -218,6 +300,7 @@ int32_t computePIDL( float input, float setpoint, float kp, float ki, float kd, 
 
 void setup()
 {
+	//Setup radio
 	radio.begin(); 
 	radio.setAutoAck(1);       
 	radio.setRetries(0, 3 /*0*/);     
@@ -226,14 +309,27 @@ void setup()
 	radio.enableDynamicPayloads();
 	radio.openReadingPipe(1, (const uint8_t *)address[0]);
 	radio.setChannel(0x64);
-
 	radio.setPALevel(RF24_PA_MIN); //RF24_PA_MIN, RF24_PA_LOW, RF24_PA_HIGH, RF24_PA_MAX
 	radio.setDataRate(RF24_250KBPS); //RF24_2MBPS, RF24_1MBPS, RF24_250KBPS
-
 	radio.powerUp(); 
-
 	radio.startListening();  
-	stsLed.turn_on();
+	///////////////////////
+
+	//Setup sound
+	Serial2.begin(9600);
+
+	if (!dfPlayer.begin( Serial2 )) {  //Use hardwire to communicate with mp3 pins 16,17
+		Serial.println(F("Unable to begin:"));
+		Serial.println(F("1.Please recheck the connection!"));
+		Serial.println(F("2.Please insert the SD card!"));
+	}
+
+	dfPlayer.setTimeOut(500);
+	dfPlayer.volume(30);
+	dfPlayer.EQ( DFPLAYER_EQ_NORMAL );
+	dfPlayer.outputDevice( DFPLAYER_DEVICE_SD );
+
+	///////////////////////
 
 	// Create semaphore to inform us when the timer has fired
 	timerSemaphore = xSemaphoreCreateBinary();
@@ -258,17 +354,13 @@ void setup()
 	/*ledcSetup( 0, 1000, 8 );
 	ledcAttachPin( motorRSpdPin, 0 );*/
 	
-	motorR.begin();
-	motorL.begin();
-
-	delay(1000);
 
 	//If slot is closed high if open low.
 	pinMode( motorLSpdReadPin, INPUT_PULLUP );
 	pinMode( motorRSpdReadPin, INPUT_PULLUP );
 
-	attachInterrupt( digitalPinToInterrupt(motorLSpdReadPin), encMotorL, FALLING);
-	attachInterrupt( digitalPinToInterrupt(motorRSpdReadPin), encMotorR, FALLING);
+	attachInterrupt( digitalPinToInterrupt( motorLSpdReadPin ), encMotorL, FALLING );
+	attachInterrupt( digitalPinToInterrupt( motorRSpdReadPin ), encMotorR, FALLING );
 	/*
 	timer.addRecuringTask( TIME.getEpochTime() , 1, [](long&) {
 		portENTER_CRITICAL_ISR(&mux);
@@ -278,59 +370,15 @@ void setup()
 		portEXIT_CRITICAL_ISR(&mux); }
 	);
 	*/
-	/*
-	timer.addRecuringTask(TIME.getEpochTime(), 1, [](long&) {
-		static uint64_t dt = millis();
-		float kp = 0.3; //2.0;
-		float ki = 1 ; ////0.9;
-		float kd = 2 ;// 0.1;
-		portENTER_CRITICAL_ISR(&mux);
 
-		LOG_MSG( "L : " << (unsigned  long)counterL.get() << " R: " << (unsigned long)counterR.get() );
+	motorR.begin();
+	motorL.begin();
 
-		if ( motorR.getSpeed() == motorL.getSpeed() )
-		{
-			if (  counterL.update()  > 0 )
-			{
-			//	uint16_t speed = motorR.getSpeed() * (counterL.get() - counterR.get()) / (counterL.get() + counterR.get());
+	driver.begin();
+	driver.setPWMFreq(1600);
+	driver.setOutputMode(false);// + and pwm   if true ( - and pwm ) 
 
-				uint16_t speed = computePIDR( counterR.get() , counterL.get(), kp, ki, kd, (float)( millis() - dt ) / 1000.0 , counterL.get() , 255) ;
-				
-				speed = motorR.getSpeed() * ( float )( speed / counterL.get() );
-				
-				if (motorR.getDirection() == Motor::Direction::FORWARD)
-					motorR.forward(speed);
-				if (motorR.getDirection() == Motor::Direction::BACKWARD)
-					motorR.backward(speed);
-				
-				LOG_MSG("1 "  << speed);
-			}
-			else if (counterR.get() > 0 )
-			{
-				//	uint16_t speed = motorR.getSpeed() * (counterR.get() - counterL.get()) / (counterL.get() + counterR.get());
-
-				uint16_t speed = computePIDL( counterL.get(), counterR.get(), kp, ki, kd, (float)(millis() - dt) / 1000.0, counterR.get(), 255);
-
-				speed = motorL.getSpeed() * (float) ( speed /  counterR.get() );
-
-				if (motorL.getDirection() == Motor::Direction::FORWARD)
-					motorL.forward(speed);
-				if (motorL.getDirection() == Motor::Direction::BACKWARD)
-					motorL.backward(speed);
-
-				LOG_MSG("2 " << speed);
-			}
-		}
-
-		counterL.reset();
-		counterR.reset();
-
-		portEXIT_CRITICAL_ISR(&mux);
-
-		dt = millis();
-	}
-	);
-	*/
+	delay(1000);
 
 	LOG_MSG("Ready");
 }
@@ -428,13 +476,13 @@ void handlePID() {
 	if ( !counterL.m_counter && !counterR.m_counter ) {
 		return;
 	}
+	uint16_t speed = motorR.getSpeed();
 
-	if ( motorL.getSpeed() != 0 && motorL.getSpeed() == motorR.getSpeed() )
+	if ( speed != 0 && motorL.getSpeed() == motorR.getSpeed() )
 	{
 		if ( 0 == counterR.m_counter ) {
 			LOG_MSG("Boost right");
-			uint16_t speed = motorR.getSpeed();
-
+		
 			if (motorR.getDirection() == Motor::Direction::FORWARD)
 				motorR.forward( speed + 0.1 * speed );
 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
@@ -452,8 +500,7 @@ void handlePID() {
 		if ( 0 == counterL.m_counter ) {
 
 			LOG_MSG("Boost left");
-			uint16_t speed = motorL.getSpeed();
-
+		
 			if (motorL.getDirection() == Motor::Direction::FORWARD)
 				motorL.forward(speed + 0.1 * speed);
 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
@@ -481,6 +528,11 @@ void handlePID() {
 	
 }
 
+void stop() {
+	soundEffect.playSound( SE_STOP_ENGINE );
+	motorL.stop();
+	motorR.stop();
+}
 
 void loop()
 {
@@ -498,6 +550,7 @@ void loop()
 	timer.run();
 	motorR.run(); 
 	motorL.run();
+	soundEffect.run();
 
 	if ( xSemaphoreTake( timerSemaphore, 0 ) == pdTRUE ) {
 		//adjust the speed
@@ -518,8 +571,6 @@ void loop()
         if ( pre_recieved_data == recieved_data ) {
 			continue;
 		}
-		
-		pre_recieved_data = recieved_data;
 
 		LOG_MSG( F("RCV : ")  
 			<< F(" j0 ") << recieved_data.m_j[0]
@@ -541,21 +592,26 @@ void loop()
 			backLight.turn_off();
 		}
 
-		if (recieved_data.m_b1) {
-			motorL.stop();
-			motorR.stop();
+		if ( ( recieved_data.m_b3 && recieved_data.m_b4 )  
+			&& !pre_recieved_data.m_b3 && !pre_recieved_data.m_b4) 	{
+			soundEffect.playSound(SE_START_ENGINE);
 		}
 
-		/* Calculate motor PWM */
-		alg1( -recieved_data.m_steering , recieved_data.m_speed, lMotor, rMotor );
-
-		if (motorL.getSpeed() != lMotor || rMotor != motorR.getSpeed() ) {
-			( lMotor > 0 ) ? motorL.backward( map( lMotor, 0, 127, 100, 255) )
-				: motorL.forward( map( lMotor, -127, 0, 255, 100) );
-			( rMotor > 0 ) ? motorR.backward( map(rMotor, 0, 127, 100, 255) )
-				: motorR.forward( map( rMotor, -127, 0, 255, 100) );
+		if ( recieved_data.m_b1 ) {
+			stop();
 		}
+		else {
+			/* Calculate motor PWM */
+			alg1(-recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor);
 
+			(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, 100, 255 ) )
+						: motorL.forward( map( lMotor, -127, 0, 255, 100 ) );
+
+			(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, 100, 255 ) )
+						: motorR.forward( map( rMotor, -127, 0, 255, 100 ) );
+
+			soundEffect.playSound( SE_MOVE_FAST );
+		}
 	/************************************************************************/
 		/*
 		if (recieved_data.m_j4 > 0)
@@ -572,22 +628,20 @@ void loop()
 		payLoadAck.speed = lMotor;
 		payLoadAck.batteryLevel = lMotor;
 		radio.writeAckPayload(pipeNo, &payLoadAck, sizeof(payLoadAck));
+
+		pre_recieved_data = recieved_data;
 	}
 
 	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS ) {
 		LOG_MSG("Lost connection");
-		stsLed.blynk();
 
-		motorR.stop(); motorL.stop();
+		stop();
 
-		headLight.fade(500);
+	//	headLight.fade(750);
+		backLight.fade(750);
 
 		lastRecievedTime = millis();
 	}
-
-	/*if ( ! radio.isChipConnected() ) {
-		RESET();
-	}*/
 }
 
 
