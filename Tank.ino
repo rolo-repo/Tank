@@ -10,7 +10,6 @@
 
 #include "DFRobotDFPlayerMini.h"
 #include "Adafruit_PWMServoDriver.h"
-
 #define  ENABLE_LOGGER
 
 #include "Constants.h"
@@ -23,13 +22,17 @@
 #include "SerialOutput.h"
 #include "TimeManager.h"
 
+#include "XT_DAC_Audio.h"
+#include "0003idle_motor.mp3.h"
+//#include "0005start_moving.wav.h"
+//#include "0004moving.wav.h"
 /*
 0	pulled up	OK	outputs PWM signal at boot
 1   TX
 2	OK	OK	M2
 3   RX
 4	OK	OK  M2
-5	OK	OK	outputs PWM signal at boot  -  SS
+5	OK	OK	outputs PWM signal at boot
 6	x	x	connected to the integrated SPI flash
 7	x	x	connected to the integrated SPI flash
 8	x	x	connected to the integrated SPI flash
@@ -58,20 +61,19 @@
 39	OK		input only
 */
 
-
 // SPI
 constexpr PIN _MOSI = 23;
 constexpr PIN _MISO = 19;
 constexpr PIN _SCK = 18;
-constexpr PIN _SS = 5;
-constexpr PIN _SCN = 13; //any pin
+constexpr PIN _SS = 5;   //CE  in general can be connected to high as only recv is used , but leaving it
+constexpr PIN _SCN = 15; //CSN
 
 constexpr PIN _SCL = 22; //I2C
 constexpr PIN _SDA = 21; //I2C
 
 
-constexpr PIN motorLFrdPin = 14; //INT0
-constexpr PIN motorLSpdPin = 26; //PWM //INT1
+constexpr PIN motorLFrdPin = 26; //INT0
+constexpr PIN motorLSpdPin = 14; //PWM //INT1
 constexpr PIN motorLBwdPin = 27;
 constexpr PIN motorLSpdReadPin = 35;
 
@@ -80,9 +82,9 @@ constexpr PIN motorRSpdPin = 4;; //PWM //INT1
 constexpr PIN motorRBwdPin = 12;
 constexpr PIN motorRSpdReadPin = 34;
 
-//constexpr PIN 15;
+//constexpr PIN 13;
 
-constexpr PIN audioOutputPin = 25;
+constexpr PIN audioOutputPin = 25; //DAC
 
 constexpr PIN turretLeftPin = 32;
 constexpr PIN turretRightPin = 33;
@@ -94,7 +96,7 @@ Adafruit_PWMServoDriver driver = Adafruit_PWMServoDriver();
 PCA_Led< Adafruit_PWMServoDriver> headLight( 14, driver );
 PCA_Led< Adafruit_PWMServoDriver> backLight( 15, driver );
 
-arduino::utils::Timer timer("timer");
+arduino::utils::Timer scheduler("timer");
 
 hw_timer_t * hr_timer = NULL;
 
@@ -118,25 +120,50 @@ public:
 	encCounter( PIN i_pin ) : m_pin ( i_pin ) {
 	}
 
+
 	unsigned long calcRPM() volatile {
-		if ( m_counter != 0) {
-			return (60000 / ( dt * 4 ) );
+		
+		unsigned int average_dt = 0 , size = 0 , rpm = 0;
+
+		for ( auto val : m_series_dt ) {
+			average_dt += val;
+
+			if ( val != 0 )
+				 size++;
 		}
-		else {
-			return 0;
+
+		if ( average_dt != 0 ) {
+			average_dt /= size;
+			rpm = ( 60000 / ( average_dt * 4 ) );
 		}
+	
+		return constrain ( rpm , 0 , 600 ) ;
 	}
 
-	uint64_t update() volatile {
-	//	bool curState = digitalRead( m_pin ) ;
-		
-		if ( millis() - t > 10 ) {
-			dt = millis() - t;
-			t  = millis();
+	uint64_t update(bool force = false) volatile {
 
-		//	m_lastState = curState;
-			m_counter++;
+		if ( millis() - t > 5 ) {
+			int curState = digitalRead(m_pin);
+			index++;
+
+			if ( LOW == curState && curState != m_lastState ) {
+				m_series_dt[index % SIZE_OF_ARR(m_series_dt)] =  millis() - t;
+				++m_counter;
+			}
+
+			if ( millis() - t > 350 && curState == m_lastState ) {
+				m_counter = 0;
+				memset( (void*) m_series_dt, 0x0, sizeof(m_series_dt));
+			}
+
+			t = millis();
+			m_lastState = curState;
 		}
+
+		return m_counter;
+	}
+
+	uint16_t get() volatile {
 		return m_counter;
 	}
 
@@ -151,11 +178,18 @@ public:
 		return res;
 	}
 
-	bool m_lastState = 0;
-	uint64_t m_counter = 0;
+	int m_lastState = LOW ;
 	
+	uint16_t m_counter = 0;
+	uint16_t m_trend = 0;
+	uint32_t index = 0;
+
+	uint16_t m_series_dt[4];
+
 	uint64_t t =  0;
 	uint64_t dt = 0;
+
+	float trend = 0;
 
 private :
 	PIN  m_pin;
@@ -165,81 +199,78 @@ volatile encCounter counterL( motorLSpdReadPin );
 volatile encCounter counterR( motorRSpdReadPin );
 
 
-enum SOUND_EFFECTS {	
-	SE_START_ENGINE = 1, 
-	SE_STOP_ENGINE = 2,
-	SE_IDLE_RUN = 3,
-	SE_MOVE_SLOW = 1,
-	SE_MOVE_FAST = 2,
-	SE_BREAK = 3,
-	SE_TURN_TURRET = 1,
-	SE_MOVE_BARREL =2,
-	SE_FIRE = 3,
+XT_DAC_Audio_Class DacAudio( audioOutputPin, 1 );
+
+enum SOUND_EFFECT_ID {	
+	SE_START_ENGINE = 0,
+	SE_IDLE = 1,
+	SE_MOVING = 2,
+	SE_STOP_ENGINE = 3,
+//	SE_BREAK,
+//	SE_TURN_TURRET,
+//	SE_MOVE_BARREL,
+//	SE_FIRE ,
 	SE_LAST 
 };
 
+static struct XT_SoundEffect
+{
+	SOUND_EFFECT_ID id;
+    XT_Wav_Class sound;
+	XT_SoundEffect(SOUND_EFFECT_ID i_id, const unsigned char* i_wav, bool i_is_loop = false) : id(i_id), sound(XT_Wav_Class(i_wav)) { sound.RepeatForever = i_is_loop; }
+} SoundEffects[] = {
+	 XT_SoundEffect( SE_START_ENGINE , idle_motor , false) , // 0
+	 XT_SoundEffect( SE_IDLE , idle_motor , true ), // 1
+	 XT_SoundEffect( SE_MOVING , idle_motor , true ),
+	 XT_SoundEffect( SE_STOP_ENGINE , idle_motor , false),//3
+	 XT_SoundEffect( SE_LAST , idle_motor , false )	// 4
+};
 
 class SoundEffect {
 
 public:
 	SoundEffect (){
-		m_id = SE_LAST;
 		next = []() {};
 	}
 
 	void run() {
-		if ( dfPlayer.available() ) {
-			switch ( dfPlayer.readType() ) {
-			   case DFPlayerPlayFinished:
-				   next();
-				   break;
-			}				
-		}
+		DacAudio.FillBuffer();
+
+// 		if ( dfPlayer.available() ) {
+// 			switch ( dfPlayer.readType() ) {
+// 			   case DFPlayerPlayFinished:
+// 				   next();
+// 				   break;
+// 			}				
+// 		}
 	}
 
-	void playSound(SOUND_EFFECTS i_sound) {
-		if (m_id != i_sound) {
-			LOG_MSG("Play" << i_sound);
-
-			if (m_id == SE_LAST) {
-				dfPlayer.play(i_sound);
-			}
-			else {
-				dfPlayer.stop();
-			}
-
-			m_id = i_sound;
-			next = [=]() { dfPlayer.loop((short)i_sound); };
-		}
+	void mute() {
+		DacAudio.StopAllSounds();
 	}
 
-	void playFrontend( SOUND_EFFECTS i_sound )  {
-		if (dfPlayer.available())
-			dfPlayer.advertise(i_sound);
+	void playSound( SOUND_EFFECT_ID i_sound , bool i_is_mix = true ) {
+		int16_t sound_id = constrain( i_sound, 0, SOUND_EFFECT_ID::SE_LAST );
+		DacAudio.Play( &SoundEffects[sound_id].sound , i_is_mix );
 	}
 
 private:
-	SOUND_EFFECTS m_id;
-
 	typedef std::function<void()> NextPlay;
 	NextPlay next ;
-};
+} soundEffect;
 
-SoundEffect soundEffect;
 void breakHook();
 
-BTS7960_1PWM   motorR(motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, 110);
-BTS7960_1PWM   motorL(motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, 110);
+BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, 110 );
+BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, 110 );
 
 void breakHook()
 {
 	if (motorR.getSpeed() == motorL.getSpeed()) {
-		soundEffect.playSound(SE_BREAK);
+	//	soundEffect.playSound(SE_IDLE_RUN);
 		backLight.turn_on();
 	}
 }
-
-
 
 void IRAM_ATTR encMotorR() {
 
@@ -259,7 +290,7 @@ void IRAM_ATTR encMotorL() {
 	counterL.update();
 }
 
-void IRAM_ATTR onTimer() {
+void IRAM_ATTR onMyTimer() {
 	// Increment the counter and set the time of ISR
 	/*portENTER_CRITICAL_ISR(&timerMux);
 	isrCounter++;
@@ -313,23 +344,7 @@ void setup()
 	radio.setDataRate(RF24_250KBPS); //RF24_2MBPS, RF24_1MBPS, RF24_250KBPS
 	radio.powerUp(); 
 	radio.startListening();  
-	///////////////////////
 
-	//Setup sound
-	Serial2.begin(9600);
-
-	if (!dfPlayer.begin( Serial2 )) {  //Use hardwire to communicate with mp3 pins 16,17
-		Serial.println(F("Unable to begin:"));
-		Serial.println(F("1.Please recheck the connection!"));
-		Serial.println(F("2.Please insert the SD card!"));
-	}
-
-	dfPlayer.setTimeOut(500);
-	dfPlayer.volume(30);
-	dfPlayer.EQ( DFPLAYER_EQ_NORMAL );
-	dfPlayer.outputDevice( DFPLAYER_DEVICE_SD );
-
-	///////////////////////
 
 	// Create semaphore to inform us when the timer has fired
 	timerSemaphore = xSemaphoreCreateBinary();
@@ -340,11 +355,11 @@ void setup()
 	hr_timer = timerBegin(0, 80, true);
 
 	// Attach onTimer function to our timer.
-	timerAttachInterrupt( hr_timer, &onTimer, true );
+	timerAttachInterrupt( hr_timer, &onMyTimer, true );
 
 	// Set alarm to call onTimer function every second (value in microseconds).
 	// Repeat the alarm (third parameter)
-	timerAlarmWrite( hr_timer, 100000 , true ); //0.1 sec
+	timerAlarmWrite( hr_timer, 500000 , true ); //0.1 sec
 
 	// Start an alarm
 	timerAlarmEnable( hr_timer );
@@ -359,8 +374,8 @@ void setup()
 	pinMode( motorLSpdReadPin, INPUT_PULLUP );
 	pinMode( motorRSpdReadPin, INPUT_PULLUP );
 
-	attachInterrupt( digitalPinToInterrupt( motorLSpdReadPin ), encMotorL, FALLING );
-	attachInterrupt( digitalPinToInterrupt( motorRSpdReadPin ), encMotorR, FALLING );
+	attachInterrupt( digitalPinToInterrupt( motorLSpdReadPin ), encMotorL, CHANGE );
+	attachInterrupt( digitalPinToInterrupt( motorRSpdReadPin ), encMotorR, CHANGE );
 	/*
 	timer.addRecuringTask( TIME.getEpochTime() , 1, [](long&) {
 		portENTER_CRITICAL_ISR(&mux);
@@ -448,77 +463,95 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 
 void handlePID() {
 	
-	float kp = 0.05; //2.0;
+	float kp = 0.5; //2.0;
 	float ki = 0.01; ////0.9;
 	float kd = 0.02;// 0.1;
 	portENTER_CRITICAL_ISR(&mux_l);
+	static int trendLeft = 0;
+	static int trendRight = 0;
 
-	ScopedGuard guard = makeScopedGuard([]() { 
-		if ( counterL.m_counter != 0 ){
-			LOG_MSG("L: " << (long)counterL.dt  << " "  << counterL.toString())
-			
+	ScopedGuard guard = makeScopedGuard([]() {
+		if ( counterL.get() != 0 ){
+			LOG_MSG("L: " << (long)counterL.dt << " " << counterL.toString() << " " << trendLeft);
 		}
+		counterL.update(true);
 		counterL.m_counter = 0;
-	
 		portEXIT_CRITICAL_ISR(&mux_l);
 	});
-
+	
 	portENTER_CRITICAL_ISR(&mux_r);
 	ScopedGuard guard1 = makeScopedGuard([]() {
-		if (counterR.m_counter != 0) {
-			LOG_MSG("R: " << (long)counterR.dt << " " << counterR.toString() );
-			counterR.m_counter = 0;
+		if (counterR.get() != 0) {
+			LOG_MSG("R: " << (long)counterR.dt << " " << counterR.toString() << " " << trendRight);
 		}
+		counterR.update(true);
+		counterR.m_counter = 0;
       portEXIT_CRITICAL_ISR(&mux_r);
 
 	});
 
-	if ( !counterL.m_counter && !counterR.m_counter ) {
+	static int prev_counterR = 0;
+	static int prev_counterL = 0;
+
+	if ( motorR.getSpeed() != motorL.getSpeed() || motorR.getSpeed() == 0 && motorL.getSpeed() == 0) {
 		return;
 	}
-	uint16_t speed = motorR.getSpeed();
 
-	if ( speed != 0 && motorL.getSpeed() == motorR.getSpeed() )
-	{
-		if ( 0 == counterR.m_counter ) {
-			LOG_MSG("Boost right");
-		
-			if (motorR.getDirection() == Motor::Direction::FORWARD)
-				motorR.forward( speed + 0.1 * speed );
-			if (motorR.getDirection() == Motor::Direction::BACKWARD)
-				motorR.backward( speed + 0.1 * speed );
+	unsigned int leftRPM = counterL.calcRPM();
+	unsigned int rightRPM = counterR.calcRPM();
 
-			delay(25);
+	int32_t pwmR = computePIDR( counterR.get(), counterL.get(), kp, ki, kd, 0.5 , -255 , 255 );
+	pwmR = map(pwmR, -10, 10, -20, 20);
 
-			if (motorR.getDirection() == Motor::Direction::FORWARD)
-				motorR.forward(speed);
-			if (motorR.getDirection() == Motor::Direction::BACKWARD)
-				motorR.backward(speed);
+	int32_t pwmL = computePIDL( counterL.get(), counterR.get(), kp, ki, kd, 0.5 , -255 , 255 );
+	pwmL = map(pwmL, -10, 10, -20, 20);
 
-		}
+	motorR.adjust( motorR.getSpeed() + pwmL );
+	motorL.adjust( motorL.getSpeed() + pwmR );
 
-		if ( 0 == counterL.m_counter ) {
 
-			LOG_MSG("Boost left");
-		
-			if (motorL.getDirection() == Motor::Direction::FORWARD)
-				motorL.forward(speed + 0.1 * speed);
-			if (motorL.getDirection() == Motor::Direction::BACKWARD)
-				motorL.backward(speed + 0.1 * speed);
 
-			delay(25);
+// 	if ( speed != 0 && motorL.getSpeed() == motorR.getSpeed() )
+// 	{
+// 		if ( 0 == counterR.m_counter ) {
+// 			LOG_MSG("Boost right");
+// 		
+// 			if (motorR.getDirection() == Motor::Direction::FORWARD)
+// 				motorR.forward( speed + 0.1 * speed );
+// 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
+// 				motorR.backward( speed + 0.1 * speed );
+// 
+// 			delay(25);
+// 
+// 			if (motorR.getDirection() == Motor::Direction::FORWARD)
+// 				motorR.forward(speed);
+// 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
+// 				motorR.backward(speed);
+// 
+// 		}
+// 
+// 		if ( 0 == counterL.m_counter ) {
+// 
+// 			LOG_MSG("Boost left");
+// 		
+// 			if (motorL.getDirection() == Motor::Direction::FORWARD)
+// 				motorL.forward(speed + 0.1 * speed);
+// 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
+// 				motorL.backward(speed + 0.1 * speed);
+// 
+// 			delay(25);
+// 
+// 			if (motorL.getDirection() == Motor::Direction::FORWARD)
+// 				motorL.forward(speed);
+// 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
+// 				motorL.backward(speed);
+// 		}
+// 	}
+// 
+// 		
 
-			if (motorL.getDirection() == Motor::Direction::FORWARD)
-				motorL.forward(speed);
-			if (motorL.getDirection() == Motor::Direction::BACKWARD)
-				motorL.backward(speed);
-		}
-	}
-
-		
-
-	//float rouds_per_secR = (float) ( counterR.m_counter / 4.0 ) / 0.5;
-	//float rouds_per_secL = (float) ( counterL.m_counter / 4.0 ) / 0.5;
+	//float rouds_per_secR = (float) ( counterR.m_counter / 4.0 ) / 0.7;
+	//float rouds_per_secL = (float) ( counterL.m_counter / 4.0 ) / 0.7;
 
 
 	//int32_t pwmR = computePIDR( rouds_per_secR, rouds_per_secL , kp, ki, kd, 0.5 , 0 , 255 );
@@ -528,8 +561,17 @@ void handlePID() {
 	
 }
 
-void stop() {
-	soundEffect.playSound( SE_STOP_ENGINE );
+enum MODE { IDLE , MOVING , SECURED };
+
+MODE mode = SECURED;
+
+void stop_all() {
+	
+	if ( mode != SECURED )
+		soundEffect.playSound( SE_STOP_ENGINE , false );
+	
+	mode = SECURED;
+	
 	motorL.stop();
 	motorR.stop();
 }
@@ -546,8 +588,6 @@ void loop()
 	int16_t rMotor = 0;
 	int16_t lMotor = 0;
 
-	TIME.run();
-	timer.run();
 	motorR.run(); 
 	motorL.run();
 	soundEffect.run();
@@ -555,11 +595,13 @@ void loop()
 	if ( xSemaphoreTake( timerSemaphore, 0 ) == pdTRUE ) {
 		//adjust the speed
 		handlePID();
+		TIME.run();
+		scheduler.run();
 	}
 
-	while (  radio.available(&pipeNo) )
+	while ( radio.available(&pipeNo) )
 	{
-		radio.read(&recieved_data, sizeof(recieved_data));
+		radio.read( &recieved_data, sizeof(recieved_data) );
 
 		if (!recieved_data.isValid()) {
 			LOG_MSG(F("Garbage on RF") );
@@ -592,26 +634,29 @@ void loop()
 			backLight.turn_off();
 		}
 
-		if ( ( recieved_data.m_b3 && recieved_data.m_b4 )  
-			&& !pre_recieved_data.m_b3 && !pre_recieved_data.m_b4) 	{
-			soundEffect.playSound(SE_START_ENGINE);
-		}
+		/* Calculate motor PWM */
+		alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
 
-		if ( recieved_data.m_b1 ) {
-			stop();
+		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, 100, 255 ) )
+					: motorL.forward( map( lMotor, -127, 0, 255, 100 ) );
+
+		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, 100, 255 ) )
+					: motorR.forward( map( rMotor, -127, 0, 255, 100 ) );
+
+		if ( SECURED == mode )
+			soundEffect.playSound( SE_START_ENGINE , false );
+
+		if ( ( (uint8_t) motorR.getDirection() | (uint8_t) motorL.getDirection() ) 
+			!= (uint8_t) Motor::Direction::STOPED ) {
+			soundEffect.playSound( SE_MOVING , true );
+			mode = MOVING;
 		}
 		else {
-			/* Calculate motor PWM */
-			alg1(-recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor);
-
-			(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, 100, 255 ) )
-						: motorL.forward( map( lMotor, -127, 0, 255, 100 ) );
-
-			(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, 100, 255 ) )
-						: motorR.forward( map( rMotor, -127, 0, 255, 100 ) );
-
-			soundEffect.playSound( SE_MOVE_FAST );
+			soundEffect.playSound( SE_IDLE , true );
+			mode = IDLE;
 		}
+
+		
 	/************************************************************************/
 		/*
 		if (recieved_data.m_j4 > 0)
@@ -635,9 +680,9 @@ void loop()
 	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS ) {
 		LOG_MSG("Lost connection");
 
-		stop();
+		stop_all();
 
-	//	headLight.fade(750);
+		headLight.fade(750);
 		backLight.fade(750);
 
 		lastRecievedTime = millis();
