@@ -261,8 +261,15 @@ private:
 
 void breakHook();
 
-BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, 110 );
-BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, 110 );
+constexpr int16_t motor_dead_zone = 30;
+
+//BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, motor_dead_zone);
+//BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, motor_dead_zone);
+
+
+
+TA6586   motorR(motorRFrdPin, motorRBwdPin, breakHook, motor_dead_zone);
+TA6586   motorL(motorLFrdPin, motorLBwdPin, []() {}, motor_dead_zone);
 
 void breakHook()
 {
@@ -464,8 +471,8 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 void handlePID() {
 	
 	float kp = 0.5; //2.0;
-	float ki = 0.01; ////0.9;
-	float kd = 0.02;// 0.1;
+	float ki = 0.9; ////0.9;
+	float kd = 0.1;// 0.1;
 	portENTER_CRITICAL_ISR(&mux_l);
 	static int trendLeft = 0;
 	static int trendRight = 0;
@@ -475,7 +482,7 @@ void handlePID() {
 			LOG_MSG("L: " << (long)counterL.dt << " " << counterL.toString() << " " << trendLeft);
 		}
 		counterL.update(true);
-		counterL.m_counter = 0;
+		
 		portEXIT_CRITICAL_ISR(&mux_l);
 	});
 	
@@ -485,7 +492,7 @@ void handlePID() {
 			LOG_MSG("R: " << (long)counterR.dt << " " << counterR.toString() << " " << trendRight);
 		}
 		counterR.update(true);
-		counterR.m_counter = 0;
+	
       portEXIT_CRITICAL_ISR(&mux_r);
 
 	});
@@ -494,20 +501,22 @@ void handlePID() {
 	static int prev_counterL = 0;
 
 	if ( motorR.getSpeed() != motorL.getSpeed() || motorR.getSpeed() == 0 && motorL.getSpeed() == 0) {
+		counterL.m_counter = 0;
+		counterR.m_counter = 0;
 		return;
 	}
 
 	unsigned int leftRPM = counterL.calcRPM();
 	unsigned int rightRPM = counterR.calcRPM();
 
-	int32_t pwmR = computePIDR( counterR.get(), counterL.get(), kp, ki, kd, 0.5 , -255 , 255 );
-	pwmR = map(pwmR, -10, 10, -20, 20);
+	int32_t pwmR = computePIDR( counterL.get(), counterR.get(), kp, ki, kd, 0.5 , -255 , 255 );
+	//pwmR = map(pwmR, -10, 10, -20, 20);
 
-	int32_t pwmL = computePIDL( counterL.get(), counterR.get(), kp, ki, kd, 0.5 , -255 , 255 );
-	pwmL = map(pwmL, -10, 10, -20, 20);
+	int32_t pwmL = computePIDL( counterR.get(), counterL.get(), kp, ki, kd, 0.5 , -255 , 255 );
+//	pwmL = map(pwmL, -10, 10, -20, 20);
 
-	motorR.adjust( motorR.getSpeed() + pwmL );
-	motorL.adjust( motorL.getSpeed() + pwmR );
+	//motorR.adjust( motorR.getSpeed() + pwmR );
+	//motorL.adjust( motorL.getSpeed() + pwmL );
 
 
 
@@ -637,11 +646,11 @@ void loop()
 		/* Calculate motor PWM */
 		alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
 
-		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, 100, 255 ) )
-					: motorL.forward( map( lMotor, -127, 0, 255, 100 ) );
+		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, motor_dead_zone - 5 , 255 ) )
+					: motorL.forward( map( lMotor, -127, 0, 255, motor_dead_zone - 5 ) );
 
-		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, 100, 255 ) )
-					: motorR.forward( map( rMotor, -127, 0, 255, 100 ) );
+		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, motor_dead_zone - 5 , 255 ) )
+					: motorR.forward( map( rMotor, -127, 0, 255, motor_dead_zone  -5 ) );
 
 		if ( SECURED == mode )
 			soundEffect.playSound( SE_START_ENGINE , false );
