@@ -13,7 +13,9 @@
 #define  ENABLE_LOGGER
 
 #include "Constants.h"
-#include "BTS7960.h"
+//#include "BTS7960.h"
+#include "TA6586.h"
+
 #include "RFcom.h"
 #include "Led.h"
 #include "ScopedGuard.h"
@@ -72,17 +74,17 @@ constexpr PIN _SCL = 22; //I2C
 constexpr PIN _SDA = 21; //I2C
 
 
-constexpr PIN motorLFrdPin = 26; //INT0
-constexpr PIN motorLSpdPin = 14; //PWM //INT1
+constexpr PIN motorLFrdPin = 26; 
 constexpr PIN motorLBwdPin = 27;
 constexpr PIN motorLSpdReadPin = 35;
 
-constexpr PIN motorRFrdPin = 2; //INT0
-constexpr PIN motorRSpdPin = 4;; //PWM //INT1 
-constexpr PIN motorRBwdPin = 12;
+constexpr PIN motorRFrdPin = 2; 
+constexpr PIN motorRBwdPin = 4;
 constexpr PIN motorRSpdReadPin = 34;
 
+//constexpr PIN 14; high on boot
 //constexpr PIN 13;
+//constexpr PIN 12;
 
 constexpr PIN audioOutputPin = 25; //DAC
 
@@ -137,22 +139,23 @@ public:
 			rpm = ( 60000 / ( average_dt * 4 ) );
 		}
 	
-		return constrain ( rpm , 0 , 600 ) ;
+		return constrain ( rpm , 0 , 1500 ) ;
 	}
 
 	uint64_t update(bool force = false) volatile {
 
 		if ( millis() - t > 5 ) {
 			int curState = digitalRead(m_pin);
-			index++;
+			m_index++;
 
 			if ( LOW == curState && curState != m_lastState ) {
-				m_series_dt[index % SIZE_OF_ARR(m_series_dt)] =  millis() - t;
+				m_series_dt[m_index % SIZE_OF_ARR(m_series_dt)] =  millis() - t;
 				++m_counter;
 			}
 
 			if ( millis() - t > 350 && curState == m_lastState ) {
 				m_counter = 0;
+				m_index = 0;
 				memset( (void*) m_series_dt, 0x0, sizeof(m_series_dt));
 			}
 
@@ -178,18 +181,13 @@ public:
 		return res;
 	}
 
-	int m_lastState = LOW ;
-	
+	int m_lastState = HIGH ;
+
+	uint16_t m_series_dt[8];
 	uint16_t m_counter = 0;
-	uint16_t m_trend = 0;
-	uint32_t index = 0;
-
-	uint16_t m_series_dt[4];
-
+	uint32_t m_index = 0;
+	
 	uint64_t t =  0;
-	uint64_t dt = 0;
-
-	float trend = 0;
 
 private :
 	PIN  m_pin;
@@ -431,7 +429,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
 	int32_t nPivSpeed;      // Pivot Speed                          (-128..+127)
 	float   fPivScale;      // Balance scale b/w drive and pivot    (   0..1   )
-	float   fPivYLimit = 35; //should be more or less equal to dead zone of motor
+	float   fPivYLimit = 50; //should be more or less equal to dead zone of motor 40 tested
 
 	// INPUTS
 	//int32_t     nJoyX;              // Joystick X input                     (-128..+127)
@@ -460,7 +458,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 	// Now calculate pivot amount
 	// - Strength of pivot (nPivSpeed) based on Joystick X input
 	// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
-	nPivSpeed = constrain(nJoyX, -64, 64 );
+	nPivSpeed = constrain(nJoyX, -20,20 ); // higher the higher speed of spot rotation
 	fPivScale = (abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit);
 
 	// Calculate final mix of Drive and Pivot
@@ -479,7 +477,7 @@ void handlePID() {
 
 	ScopedGuard guard = makeScopedGuard([]() {
 		if ( counterL.get() != 0 ){
-			LOG_MSG("L: " << (long)counterL.dt << " " << counterL.toString() << " " << trendLeft);
+			LOG_MSG("L: "  << counterL.toString() );
 		}
 		counterL.update(true);
 		
@@ -489,7 +487,7 @@ void handlePID() {
 	portENTER_CRITICAL_ISR(&mux_r);
 	ScopedGuard guard1 = makeScopedGuard([]() {
 		if (counterR.get() != 0) {
-			LOG_MSG("R: " << (long)counterR.dt << " " << counterR.toString() << " " << trendRight);
+			LOG_MSG("R: " <<  counterR.toString() );
 		}
 		counterR.update(true);
 	
@@ -509,10 +507,10 @@ void handlePID() {
 	unsigned int leftRPM = counterL.calcRPM();
 	unsigned int rightRPM = counterR.calcRPM();
 
-	int32_t pwmR = computePIDR( counterL.get(), counterR.get(), kp, ki, kd, 0.5 , -255 , 255 );
+	int32_t pwmR = computePIDR(rightRPM , leftRPM, kp, ki, kd, 0.5 ,0, 2000 );
 	//pwmR = map(pwmR, -10, 10, -20, 20);
 
-	int32_t pwmL = computePIDL( counterR.get(), counterL.get(), kp, ki, kd, 0.5 , -255 , 255 );
+	int32_t pwmL = computePIDL(leftRPM, rightRPM, kp, ki, kd, 0.5 , 0 , 2000 );
 //	pwmL = map(pwmL, -10, 10, -20, 20);
 
 	//motorR.adjust( motorR.getSpeed() + pwmR );
