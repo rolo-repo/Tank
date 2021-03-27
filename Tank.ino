@@ -24,6 +24,8 @@
 #include "SerialOutput.h"
 #include "TimeManager.h"
 
+#include "Stepper.h"
+
 #include "XT_DAC_Audio.h"
 #include "0003idle_motor.mp3.h"
 //#include "0005start_moving.wav.h"
@@ -82,14 +84,14 @@ constexpr PIN motorRFrdPin = 2;
 constexpr PIN motorRBwdPin = 4;
 constexpr PIN motorRSpdReadPin = 34;
 
-//constexpr PIN 14; high on boot
-//constexpr PIN 13;
-//constexpr PIN 12;
+//constexpr PIN 14; high on boot-
 
 constexpr PIN audioOutputPin = 25; //DAC
 
-constexpr PIN turretLeftPin = 32;
-constexpr PIN turretRightPin = 33;
+constexpr PIN turret1Pin = 32;
+constexpr PIN turret2Pin = 33;
+constexpr PIN turret3Pin = 13;
+constexpr PIN turret4Pin = 12;
 
 unsigned char address[][6] = { "1Node" }; // pipe address
 
@@ -105,6 +107,8 @@ hw_timer_t * hr_timer = NULL;
 //RF24 radio(_SS , _SCN );
 //ce, csn
 RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
+
+Stepper turret(1028, turret1Pin, turret2Pin, turret3Pin, turret4Pin);
 
 DFRobotDFPlayerMini dfPlayer;
 
@@ -259,7 +263,7 @@ private:
 
 void breakHook();
 
-constexpr int16_t motor_dead_zone = 30;
+constexpr int16_t motor_dead_zone = 25;
 
 //BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, motor_dead_zone);
 //BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, motor_dead_zone);
@@ -398,6 +402,8 @@ void setup()
 	driver.setPWMFreq(1600);
 	driver.setOutputMode(false);// + and pwm   if true ( - and pwm ) 
 
+	turret.setSpeed(50);
+
 	delay(1000);
 
 	LOG_MSG("Ready");
@@ -458,7 +464,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 	// Now calculate pivot amount
 	// - Strength of pivot (nPivSpeed) based on Joystick X input
 	// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
-	nPivSpeed = constrain(nJoyX, -20,20 ); // higher the higher speed of spot rotation
+	nPivSpeed = constrain(nJoyX, -20,20 ); // higher the higher speed of spot rotation this is for 64
 	fPivScale = (abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit);
 
 	// Calculate final mix of Drive and Pivot
@@ -644,11 +650,11 @@ void loop()
 		/* Calculate motor PWM */
 		alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
 
-		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, motor_dead_zone - 5 , 255 ) )
-					: motorL.forward( map( lMotor, -127, 0, 255, motor_dead_zone - 5 ) );
+		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, motor_dead_zone - 3 , 255 ) )
+					: motorL.forward( map( lMotor, -127, 0, 255, motor_dead_zone - 3 ) );
 
-		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, motor_dead_zone - 5 , 255 ) )
-					: motorR.forward( map( rMotor, -127, 0, 255, motor_dead_zone  -5 ) );
+		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, motor_dead_zone - 3 , 255 ) )
+					: motorR.forward( map( rMotor, -127, 0, 255, motor_dead_zone - 3 ) );
 
 		if ( SECURED == mode )
 			soundEffect.playSound( SE_START_ENGINE , false );
@@ -686,6 +692,8 @@ void loop()
 
 	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS ) {
 		LOG_MSG("Lost connection");
+
+		turret.step(200);
 
 		stop_all();
 
