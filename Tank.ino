@@ -108,7 +108,95 @@ hw_timer_t * hr_timer = NULL;
 //ce, csn
 RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
 
-Stepper turret(1028, turret1Pin, turret2Pin, turret3Pin, turret4Pin);
+SemaphoreHandle_t xSemaphore = NULL;
+TaskHandle_t Task1;
+
+class Turret : public Stepper
+{
+
+public:
+	Turret( int number_of_steps, int motor_pin_1, int motor_pin_2,
+		int motor_pin_3, int motor_pin_4 ) : Stepper( number_of_steps, motor_pin_1, motor_pin_2,
+			motor_pin_3, motor_pin_4 )
+	{
+		Stepper::setSpeed(100);
+	}
+
+	void right( uint16_t speed ){
+		LOG_MSG((int)speed);
+		//this->setSpeed( speed );
+		if ( xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
+			m_speed = speed;
+			m_direction = 0;
+			xSemaphoreGive(xSemaphore);
+		}
+		
+	}
+
+	void left( uint16_t speed ){
+		LOG_MSG( (int)speed );
+
+		if (xSemaphoreTake(xSemaphore, portMAX_DELAY)){
+			m_speed = speed;
+			m_direction = 1;
+			xSemaphoreGive(xSemaphore);
+		}	
+	}
+
+	void stop (){
+		LOG_MSG("stop turret");
+		if (xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+		m_direction = 2;
+		m_speed = 0;
+		
+		xSemaphoreGive(xSemaphore);
+		}
+	}
+
+	void  run() {
+
+		int16_t steps = 0;;
+
+		{
+			xSemaphoreTake(xSemaphore, portMAX_DELAY);
+
+			ScopedGuard guard = makeScopedGuard(
+				[]() { xSemaphoreGive(xSemaphore); });
+
+			if ( 2 == m_direction )
+				return;
+
+			steps = (1 == m_direction) ? -m_speed : m_speed;
+		}
+		
+		if (abs(steps) > 0 )
+		{	
+			Stepper::step(steps / 10);
+		//	( 1 == m_direction ) ? Stepper::step(steps/10) : Stepper::step(steps / 10);
+		}
+	}
+
+private :
+	int16_t m_direction = 0;
+	int16_t m_speed;
+	int16_t m_steps;
+};
+
+Turret turret( 1028, turret1Pin, turret2Pin, turret3Pin, turret4Pin);
+
+/*
+нешний диаметр выходной передачи: 7 мм (12 зубьев 0,5 модуля)
+
+
+Коэффициент уменьшения коробки передач: 1: 51,4 (приблизительно)
+
+(Приблизительно 1028 импульсных выходных валов вращаются на 360 градусов)
+
+
+Шаговый угол: двигатель 18 градусов, а выходной вал около 0,35 градусов.
+
+Фазовое сопротивление: 31,3 Ом (6 в ток короткого замыкания 0,19 а)
+*/
 
 DFRobotDFPlayerMini dfPlayer;
 
@@ -338,6 +426,8 @@ int32_t computePIDL( float input, float setpoint, float kp, float ki, float kd, 
 	return constrain(err * kp + integral + D * kd, minOut, maxOut);
 }
 
+
+
 void setup()
 {
 	//Setup radio
@@ -405,6 +495,30 @@ void setup()
 	turret.setSpeed(50);
 
 	delay(1000);
+
+	xSemaphore = xSemaphoreCreateBinary();//created locked
+	
+	disableCore0WDT();
+
+	xTaskCreatePinnedToCore(
+		[](void *) { 
+		try { 
+			while (true) { 
+					turret.run();					
+			} 
+		} 
+		catch (...) { 
+			LOG_MSG("Critical error"); 
+		}  
+	    }
+		, "Task1"   // A name just for humans
+		, 4 * 1024  // This stack size can be checked & adjusted by reading the Stack Highwater
+		, NULL
+		, 2  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
+		, &Task1
+		, 0);
+
+	xSemaphoreGive(xSemaphore);
 
 	LOG_MSG("Ready");
 }
@@ -612,22 +726,22 @@ void loop()
 		scheduler.run();
 	}
 
-	while ( radio.available(&pipeNo) )
+	while (radio.available(&pipeNo))
 	{
-		radio.read( &recieved_data, sizeof(recieved_data) );
+		radio.read(&recieved_data, sizeof(recieved_data));
 
 		if (!recieved_data.isValid()) {
-			LOG_MSG(F("Garbage on RF") );
+			LOG_MSG(F("Garbage on RF"));
 			continue;
 		}
 
 		lastRecievedTime = millis();
-		
-        if ( pre_recieved_data == recieved_data ) {
+
+		if (pre_recieved_data == recieved_data) {
 			continue;
 		}
 
-		LOG_MSG( F("RCV : ")  
+		LOG_MSG(F("RCV : ")
 			<< F(" j0 ") << recieved_data.m_j[0]
 			<< F(" j1 ") << recieved_data.m_j[1]
 			<< F(" j2 ") << recieved_data.m_j[2]
@@ -637,7 +751,7 @@ void loop()
 			<< F(" ") << recieved_data.m_b3
 			<< F(" ") << recieved_data.m_b4);
 
-		if ( recieved_data.m_b3 ) {
+		if (recieved_data.m_b3) {
 			headLight.turn_on(Led::Brightness::_100);
 			backLight.turn_on(Led::Brightness::_100);
 		}
@@ -648,39 +762,40 @@ void loop()
 		}
 
 		/* Calculate motor PWM */
-		alg1( recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor );
+		alg1(recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor);
 
-		(lMotor > 0) ? motorL.backward( map( lMotor, 0, 127, motor_dead_zone - 3 , 255 ) )
-					: motorL.forward( map( lMotor, -127, 0, 255, motor_dead_zone - 3 ) );
+		(lMotor > 0) ? motorL.backward(map(lMotor, 0, 127, motor_dead_zone - 3, 255))
+			: motorL.forward(map(lMotor, -127, 0, 255, motor_dead_zone - 3));
 
-		(rMotor > 0) ? motorR.backward( map( rMotor, 0, 127, motor_dead_zone - 3 , 255 ) )
-					: motorR.forward( map( rMotor, -127, 0, 255, motor_dead_zone - 3 ) );
+		(rMotor > 0) ? motorR.backward(map(rMotor, 0, 127, motor_dead_zone - 3, 255))
+			: motorR.forward(map(rMotor, -127, 0, 255, motor_dead_zone - 3));
 
-		if ( SECURED == mode )
-			soundEffect.playSound( SE_START_ENGINE , false );
+		if (SECURED == mode)
+			soundEffect.playSound(SE_START_ENGINE, false);
 
-		if ( ( (uint8_t) motorR.getDirection() | (uint8_t) motorL.getDirection() ) 
-			!= (uint8_t) Motor::Direction::STOPED ) {
-			soundEffect.playSound( SE_MOVING , true );
+		if (((uint8_t)motorR.getDirection() | (uint8_t)motorL.getDirection())
+			!= (uint8_t)Motor::Direction::STOPED) {
+			soundEffect.playSound(SE_MOVING, true);
 			mode = MOVING;
 		}
 		else {
-			soundEffect.playSound( SE_IDLE , true );
+			soundEffect.playSound(SE_IDLE, true);
 			mode = IDLE;
 		}
 
-		
-	/************************************************************************/
-		/*
-		if (recieved_data.m_j4 > 0)
-		{
-			turret.right(map(recieved_data.m_j4, 0, 127, 0, 255));
+
+		/************************************************************************/
+		if ( recieved_data.m_j4 ) {
+			if ( recieved_data.m_j4 > 15 ) {
+				turret.right( map(recieved_data.m_j4, 0, 127, 10, 200) );
+			}
+			else if ( recieved_data.m_j4 < -15 ) {
+				turret.left( map(recieved_data.m_j4, -127, 0, 200, 10) );
+			}
+			else{
+				turret.stop();
+			}
 		}
-		else
-		{
-			turret.left(map(recieved_data.m_j4, -127, 0, 255, 0));
-		}
-		*/
 
 		// Send ack
 		payLoadAck.speed = lMotor;
@@ -693,7 +808,7 @@ void loop()
 	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS ) {
 		LOG_MSG("Lost connection");
 
-		turret.step(200);
+		//turret.step(200);
 
 		stop_all();
 
