@@ -122,17 +122,21 @@ public:
 		setSpeed(35);
 	}
 
-	void right(uint16_t degree) {
+	void right(uint16_t degree = 0) {
 		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
 			m_direction = 1;
+			m_steps_left = ( degree * number_of_steps  / 360 ) *  ( 160 / 12 )  ;
+			LOG_MSG(m_steps_left);
 			xSemaphoreGive(xSemaphore);
 		}
 
 	}
 
-	void left(uint16_t degree) {
+	void left( uint16_t degree = 0 ) {
 		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
 			m_direction = -1;
+			m_steps_left = ( degree  * number_of_steps  / 360 ) *  ( 160 / 12 ) ;
+			LOG_MSG(m_steps_left);
 			xSemaphoreGive(xSemaphore);
 		}
 	}
@@ -141,41 +145,67 @@ public:
 		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
 			LOG_MSG("stop turret");
 			m_direction = 0;
+			m_steps_left = 0;
 			xSemaphoreGive(xSemaphore);
 		}
 	}
 
 	void  run() {
-		unsigned long now = micros();
-		// move only if the appropriate delay has passed:
-		if ( now - this->last_step_time >= this->step_delay ) {
-			// get the timeStamp of when you stepped:
-			this->last_step_time = now;
 
-			if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY))
+		if ( m_steps_left > 0 )
+		{
+			//blocking
+			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY ))
 			{
 				ScopedGuard guard = makeScopedGuard(
 					[]() { xSemaphoreGive(xSemaphore); });
 
-				if (m_direction == 1) {
-					this->step_number++;
-					if (this->step_number == this->number_of_steps) {
-						this->step_number = 0;
-					}
-				}
-				else if (m_direction == -1) {
-					if (this->step_number == 0) {
-						this->step_number = this->number_of_steps;
-					}
-
-					this->step_number--;
-				}
-				else
-					return;
+				switch (m_direction)
+				{
+					case 1:
+						step( m_steps_left );
+						break;
+					case -1:
+						step( -m_steps_left );
+						break;
+				}					
+				m_steps_left = 0;
 			}
-
-			stepMotor( this->step_number % 4 );
 		}
+		else
+		{
+			unsigned long now = micros();
+			// move only if the appropriate delay has passed:
+			if (now - this->last_step_time >= this->step_delay) {
+				// get the timeStamp of when you stepped:
+				this->last_step_time = now;
+
+				if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY))
+				{
+					ScopedGuard guard = makeScopedGuard(
+						[]() { xSemaphoreGive(xSemaphore); });
+
+					if (m_direction == 1) {
+						this->step_number++;
+						if (this->step_number == this->number_of_steps) {
+							this->step_number = 0;
+						}
+					}
+					else if (m_direction == -1) {
+						if (this->step_number == 0) {
+							this->step_number = this->number_of_steps;
+						}
+
+						this->step_number--;
+					}
+					else
+						return;
+				}
+
+				stepMotor(this->step_number % 4);
+			}
+		}
+		
 	}
 
 private:
@@ -785,10 +815,12 @@ void loop()
 
 		/************************************************************************/
 		if (recieved_data.m_j4 > 10) {
-			turret.right(map(recieved_data.m_j4, 0, 127, 50, 150));
+			//turret.right( map(recieved_data.m_j4, 0, 127, 0, 180) );
+			turret.right();
 		}
 		else if (recieved_data.m_j4 < -10) {
-			turret.left(map(recieved_data.m_j4, -127, 0, 150, 50));
+			turret.left();
+			//turret.left( map(recieved_data.m_j4, -127, 0, 180, 0) );
 		}
 		else {
 			turret.stop();
