@@ -1,7 +1,7 @@
 ﻿/*
-    Name:       Tank.ino
-    Created:	03-Jan-21 11:28:49
-    Author:     NTNET\ROMANL
+	Name:       Tank.ino
+	Created:	03-Jan-21 11:28:49
+	Author:     NTNET\ROMANL
 */
 
 #include "SPI.h"
@@ -76,11 +76,11 @@ constexpr PIN _SCL = 22; //I2C
 constexpr PIN _SDA = 21; //I2C
 
 
-constexpr PIN motorLFrdPin = 26; 
+constexpr PIN motorLFrdPin = 26;
 constexpr PIN motorLBwdPin = 27;
 constexpr PIN motorLSpdReadPin = 35;
 
-constexpr PIN motorRFrdPin = 2; 
+constexpr PIN motorRFrdPin = 2;
 constexpr PIN motorRBwdPin = 4;
 constexpr PIN motorRSpdReadPin = 34;
 
@@ -97,8 +97,8 @@ unsigned char address[][6] = { "1Node" }; // pipe address
 
 Adafruit_PWMServoDriver driver = Adafruit_PWMServoDriver();
 
-PCA_Led< Adafruit_PWMServoDriver> headLight( 14, driver );
-PCA_Led< Adafruit_PWMServoDriver> backLight( 15, driver );
+PCA_Led< Adafruit_PWMServoDriver> headLight(14, driver);
+PCA_Led< Adafruit_PWMServoDriver> backLight(15, driver);
 
 arduino::utils::Timer scheduler("timer");
 
@@ -106,7 +106,7 @@ hw_timer_t * hr_timer = NULL;
 
 //RF24 radio(_SS , _SCN );
 //ce, csn
-RF24 radio( _SS , _SCN, _SCK, _MISO, _MOSI );
+RF24 radio(_SS, _SCN, _SCK, _MISO, _MOSI);
 
 SemaphoreHandle_t xSemaphore = NULL;
 TaskHandle_t Task1;
@@ -115,74 +115,75 @@ class Turret : public Stepper
 {
 
 public:
-	Turret( int number_of_steps, int motor_pin_1, int motor_pin_2,
-		int motor_pin_3, int motor_pin_4 ) : Stepper( number_of_steps, motor_pin_1, motor_pin_2,
-			motor_pin_3, motor_pin_4 )
+	Turret(int motor_pin_1, int motor_pin_2,
+		int motor_pin_3, int motor_pin_4) : Stepper(1028, motor_pin_1, motor_pin_2,
+			motor_pin_3, motor_pin_4)
 	{
-		Stepper::setSpeed(100);
+		setSpeed(35);
 	}
 
-	void right( uint16_t speed ){
-		LOG_MSG((int)speed);
-		//this->setSpeed( speed );
-		if ( xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
-			m_speed = speed;
-			m_direction = 0;
-			xSemaphoreGive(xSemaphore);
-		}
-		
-	}
-
-	void left( uint16_t speed ){
-		LOG_MSG( (int)speed );
-
-		if (xSemaphoreTake(xSemaphore, portMAX_DELAY)){
-			m_speed = speed;
+	void right(uint16_t degree) {
+		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
 			m_direction = 1;
 			xSemaphoreGive(xSemaphore);
-		}	
+		}
+
 	}
 
-	void stop (){
-		LOG_MSG("stop turret");
-		if (xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
-		m_direction = 2;
-		m_speed = 0;
-		
-		xSemaphoreGive(xSemaphore);
+	void left(uint16_t degree) {
+		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+			m_direction = -1;
+			xSemaphoreGive(xSemaphore);
+		}
+	}
+
+	void stop() {
+		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+			LOG_MSG("stop turret");
+			m_direction = 0;
+			xSemaphoreGive(xSemaphore);
 		}
 	}
 
 	void  run() {
+		unsigned long now = micros();
+		// move only if the appropriate delay has passed:
+		if ( now - this->last_step_time >= this->step_delay ) {
+			// get the timeStamp of when you stepped:
+			this->last_step_time = now;
 
-		int16_t steps = 0;;
+			if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY))
+			{
+				ScopedGuard guard = makeScopedGuard(
+					[]() { xSemaphoreGive(xSemaphore); });
 
-		{
-			xSemaphoreTake(xSemaphore, portMAX_DELAY);
+				if (m_direction == 1) {
+					this->step_number++;
+					if (this->step_number == this->number_of_steps) {
+						this->step_number = 0;
+					}
+				}
+				else if (m_direction == -1) {
+					if (this->step_number == 0) {
+						this->step_number = this->number_of_steps;
+					}
 
-			ScopedGuard guard = makeScopedGuard(
-				[]() { xSemaphoreGive(xSemaphore); });
+					this->step_number--;
+				}
+				else
+					return;
+			}
 
-			if ( 2 == m_direction )
-				return;
-
-			steps = (1 == m_direction) ? -m_speed : m_speed;
-		}
-		
-		if (abs(steps) > 0 )
-		{	
-			Stepper::step(steps / 10);
-		//	( 1 == m_direction ) ? Stepper::step(steps/10) : Stepper::step(steps / 10);
+			stepMotor( this->step_number % 4 );
 		}
 	}
 
-private :
+private:
 	int16_t m_direction = 0;
-	int16_t m_speed;
-	int16_t m_steps;
+	int16_t m_steps_left = 0;
 };
 
-Turret turret( 1028, turret1Pin, turret2Pin, turret3Pin, turret4Pin);
+Turret turret(turret1Pin, turret2Pin, turret3Pin, turret4Pin);
 
 /*
 нешний диаметр выходной передачи: 7 мм (12 зубьев 0,5 модуля)
@@ -211,44 +212,44 @@ volatile SemaphoreHandle_t timerSemaphore;
 
 class encCounter {
 public:
-	encCounter( PIN i_pin ) : m_pin ( i_pin ) {
+	encCounter(PIN i_pin) : m_pin(i_pin) {
 	}
 
 
 	unsigned long calcRPM() volatile {
-		
-		unsigned int average_dt = 0 , size = 0 , rpm = 0;
 
-		for ( auto val : m_series_dt ) {
+		unsigned int average_dt = 0, size = 0, rpm = 0;
+
+		for (auto val : m_series_dt) {
 			average_dt += val;
 
-			if ( val != 0 )
-				 size++;
+			if (val != 0)
+				size++;
 		}
 
-		if ( average_dt != 0 ) {
+		if (average_dt != 0) {
 			average_dt /= size;
-			rpm = ( 60000 / ( average_dt * 4 ) );
+			rpm = (60000 / (average_dt * 4));
 		}
-	
-		return constrain ( rpm , 0 , 1500 ) ;
+
+		return constrain(rpm, 0, 1500);
 	}
 
 	uint64_t update(bool force = false) volatile {
 
-		if ( millis() - t > 5 ) {
+		if (millis() - t > 5) {
 			int curState = digitalRead(m_pin);
 			m_index++;
 
-			if ( LOW == curState && curState != m_lastState ) {
-				m_series_dt[m_index % SIZE_OF_ARR(m_series_dt)] =  millis() - t;
+			if (LOW == curState && curState != m_lastState) {
+				m_series_dt[m_index % SIZE_OF_ARR(m_series_dt)] = millis() - t;
 				++m_counter;
 			}
 
-			if ( millis() - t > 350 && curState == m_lastState ) {
+			if (millis() - t > 350 && curState == m_lastState) {
 				m_counter = 0;
 				m_index = 0;
-				memset( (void*) m_series_dt, 0x0, sizeof(m_series_dt));
+				memset((void*)m_series_dt, 0x0, sizeof(m_series_dt));
 			}
 
 			t = millis();
@@ -266,87 +267,87 @@ public:
 		String res;
 
 		res += "m_counter=";
-		res += (long)m_counter; 
+		res += (long)m_counter;
 		res += " rpm ";
 		res += calcRPM();
 
 		return res;
 	}
 
-	int m_lastState = HIGH ;
+	int m_lastState = HIGH;
 
 	uint16_t m_series_dt[8];
 	uint16_t m_counter = 0;
 	uint32_t m_index = 0;
-	
-	uint64_t t =  0;
 
-private :
+	uint64_t t = 0;
+
+private:
 	PIN  m_pin;
 };
 
-volatile encCounter counterL( motorLSpdReadPin );
-volatile encCounter counterR( motorRSpdReadPin );
+volatile encCounter counterL(motorLSpdReadPin);
+volatile encCounter counterR(motorRSpdReadPin);
 
 
-XT_DAC_Audio_Class DacAudio( audioOutputPin, 1 );
+XT_DAC_Audio_Class DacAudio(audioOutputPin, 1);
 
-enum SOUND_EFFECT_ID {	
+enum SOUND_EFFECT_ID {
 	SE_START_ENGINE = 0,
 	SE_IDLE = 1,
 	SE_MOVING = 2,
 	SE_STOP_ENGINE = 3,
-//	SE_BREAK,
-//	SE_TURN_TURRET,
-//	SE_MOVE_BARREL,
-//	SE_FIRE ,
-	SE_LAST 
+	//	SE_BREAK,
+	//	SE_TURN_TURRET,
+	//	SE_MOVE_BARREL,
+	//	SE_FIRE ,
+	SE_LAST
 };
 
 static struct XT_SoundEffect
 {
 	SOUND_EFFECT_ID id;
-    XT_Wav_Class sound;
+	XT_Wav_Class sound;
 	XT_SoundEffect(SOUND_EFFECT_ID i_id, const unsigned char* i_wav, bool i_is_loop = false) : id(i_id), sound(XT_Wav_Class(i_wav)) { sound.RepeatForever = i_is_loop; }
 } SoundEffects[] = {
-	 XT_SoundEffect( SE_START_ENGINE , idle_motor , false) , // 0
-	 XT_SoundEffect( SE_IDLE , idle_motor , true ), // 1
-	 XT_SoundEffect( SE_MOVING , idle_motor , true ),
-	 XT_SoundEffect( SE_STOP_ENGINE , idle_motor , false),//3
-	 XT_SoundEffect( SE_LAST , idle_motor , false )	// 4
+	 XT_SoundEffect(SE_START_ENGINE , idle_motor , false) , // 0
+	 XT_SoundEffect(SE_IDLE , idle_motor , true), // 1
+	 XT_SoundEffect(SE_MOVING , idle_motor , true),
+	 XT_SoundEffect(SE_STOP_ENGINE , idle_motor , false),//3
+	 XT_SoundEffect(SE_LAST , idle_motor , false)	// 4
 };
 
 class SoundEffect {
 
 public:
-	SoundEffect (){
+	SoundEffect() {
 		next = []() {};
 	}
 
 	void run() {
 		DacAudio.FillBuffer();
 
-// 		if ( dfPlayer.available() ) {
-// 			switch ( dfPlayer.readType() ) {
-// 			   case DFPlayerPlayFinished:
-// 				   next();
-// 				   break;
-// 			}				
-// 		}
+		// 		if ( dfPlayer.available() ) {
+		// 			switch ( dfPlayer.readType() ) {
+		// 			   case DFPlayerPlayFinished:
+		// 				   next();
+		// 				   break;
+		// 			}				
+		// 		}
 	}
 
 	void mute() {
 		DacAudio.StopAllSounds();
 	}
 
-	void playSound( SOUND_EFFECT_ID i_sound , bool i_is_mix = true ) {
-		int16_t sound_id = constrain( i_sound, 0, SOUND_EFFECT_ID::SE_LAST );
-		DacAudio.Play( &SoundEffects[sound_id].sound , i_is_mix );
+	void playSound(SOUND_EFFECT_ID i_sound, bool i_is_mix = true) {
+		int16_t sound_id = constrain(i_sound, 0, SOUND_EFFECT_ID::SE_LAST);
+		DacAudio.Play(&SoundEffects[sound_id].sound, i_is_mix);
 	}
 
 private:
 	typedef std::function<void()> NextPlay;
-	NextPlay next ;
+	NextPlay next;
 } soundEffect;
 
 void breakHook();
@@ -364,7 +365,7 @@ TA6586   motorL(motorLFrdPin, motorLBwdPin, []() {}, motor_dead_zone);
 void breakHook()
 {
 	if (motorR.getSpeed() == motorL.getSpeed()) {
-	//	soundEffect.playSound(SE_IDLE_RUN);
+		//	soundEffect.playSound(SE_IDLE_RUN);
 		backLight.turn_on();
 	}
 }
@@ -408,7 +409,7 @@ dt - time period the function called
 minout - min
 maxOut - max
 */
-int32_t computePIDR( float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut ) {
+int32_t computePIDR(float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
 	float err = setpoint - input;
 	static float integral = 0, prevErr = 0;
 	integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
@@ -417,7 +418,7 @@ int32_t computePIDR( float input, float setpoint, float kp, float ki, float kd, 
 	return constrain(err * kp + integral + D * kd, minOut, maxOut);
 }
 
-int32_t computePIDL( float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut ) {
+int32_t computePIDL(float input, float setpoint, float kp, float ki, float kd, float dt, int minOut, int maxOut) {
 	float err = setpoint - input;
 	static float integral = 0, prevErr = 0;
 	integral = constrain(integral + (float)err * dt * ki, minOut, maxOut);
@@ -431,9 +432,9 @@ int32_t computePIDL( float input, float setpoint, float kp, float ki, float kd, 
 void setup()
 {
 	//Setup radio
-	radio.begin(); 
-	radio.setAutoAck(1);       
-	radio.setRetries(0, 3 /*0*/);     
+	radio.begin();
+	radio.setAutoAck(1);
+	radio.setRetries(0, 3 /*0*/);
 	radio.enableAckPayload();
 	radio.setPayloadSize(sizeof(arduino::utils::Payload)/*32*/);
 	radio.enableDynamicPayloads();
@@ -441,8 +442,8 @@ void setup()
 	radio.setChannel(0x64);
 	radio.setPALevel(RF24_PA_MIN); //RF24_PA_MIN, RF24_PA_LOW, RF24_PA_HIGH, RF24_PA_MAX
 	radio.setDataRate(RF24_250KBPS); //RF24_2MBPS, RF24_1MBPS, RF24_250KBPS
-	radio.powerUp(); 
-	radio.startListening();  
+	radio.powerUp();
+	radio.startListening();
 
 
 	// Create semaphore to inform us when the timer has fired
@@ -454,33 +455,33 @@ void setup()
 	hr_timer = timerBegin(0, 80, true);
 
 	// Attach onTimer function to our timer.
-	timerAttachInterrupt( hr_timer, &onMyTimer, true );
+	timerAttachInterrupt(hr_timer, &onMyTimer, true);
 
 	// Set alarm to call onTimer function every second (value in microseconds).
 	// Repeat the alarm (third parameter)
-	timerAlarmWrite( hr_timer, 500000 , true ); //0.1 sec
+	timerAlarmWrite(hr_timer, 500000, true); //0.1 sec
 
 	// Start an alarm
-	timerAlarmEnable( hr_timer );
+	timerAlarmEnable(hr_timer);
 
 	//analogWriteFrequency(1000);
 	//analogWriteResolution(8);
 	/*ledcSetup( 0, 1000, 8 );
 	ledcAttachPin( motorRSpdPin, 0 );*/
-	
+
 
 	//If slot is closed high if open low.
-	pinMode( motorLSpdReadPin, INPUT_PULLUP );
-	pinMode( motorRSpdReadPin, INPUT_PULLUP );
+	pinMode(motorLSpdReadPin, INPUT_PULLUP);
+	pinMode(motorRSpdReadPin, INPUT_PULLUP);
 
-	attachInterrupt( digitalPinToInterrupt( motorLSpdReadPin ), encMotorL, CHANGE );
-	attachInterrupt( digitalPinToInterrupt( motorRSpdReadPin ), encMotorR, CHANGE );
+	attachInterrupt(digitalPinToInterrupt(motorLSpdReadPin), encMotorL, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(motorRSpdReadPin), encMotorR, CHANGE);
 	/*
 	timer.addRecuringTask( TIME.getEpochTime() , 1, [](long&) {
 		portENTER_CRITICAL_ISR(&mux);
-		
-		
-		
+
+
+
 		portEXIT_CRITICAL_ISR(&mux); }
 	);
 	*/
@@ -492,25 +493,23 @@ void setup()
 	driver.setPWMFreq(1600);
 	driver.setOutputMode(false);// + and pwm   if true ( - and pwm ) 
 
-	turret.setSpeed(50);
-
 	delay(1000);
 
 	xSemaphore = xSemaphoreCreateBinary();//created locked
-	
+
 	disableCore0WDT();
 
 	xTaskCreatePinnedToCore(
-		[](void *) { 
-		try { 
-			while (true) { 
-					turret.run();					
-			} 
-		} 
-		catch (...) { 
-			LOG_MSG("Critical error"); 
-		}  
-	    }
+		[](void *) {
+		try {
+			while (true) {
+				turret.run();
+			}
+		}
+		catch (...) {
+			LOG_MSG("Critical error");
+		}
+	}
 		, "Task1"   // A name just for humans
 		, 4 * 1024  // This stack size can be checked & adjusted by reading the Stack Highwater
 		, NULL
@@ -543,7 +542,7 @@ long map(const long x, const long in_min, const long in_max, const long out_min,
 		return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R*/)
+void alg1(int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/, int16_t &o_m2 /*R*/)
 {
 	float   nMotPremixL;    // Motor (left)  premixed output        (-128..+127)
 	float   nMotPremixR;    // Motor (right) premixed output        (-128..+127)
@@ -578,7 +577,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 	// Now calculate pivot amount
 	// - Strength of pivot (nPivSpeed) based on Joystick X input
 	// - Blending of pivot vs drive (fPivScale) based on Joystick Y input
-	nPivSpeed = constrain(nJoyX, -20,20 ); // higher the higher speed of spot rotation this is for 64
+	nPivSpeed = constrain(nJoyX, -20, 20); // higher the higher speed of spot rotation this is for 64
 	fPivScale = (abs(nJoyY) > fPivYLimit) ? 0.0 : (1.0 - abs(nJoyY) / fPivYLimit);
 
 	// Calculate final mix of Drive and Pivot
@@ -587,7 +586,7 @@ void alg1( int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/ , int16_t &o_m2 /*R
 }
 
 void handlePID() {
-	
+
 	float kp = 0.5; //2.0;
 	float ki = 0.9; ////0.9;
 	float kd = 0.1;// 0.1;
@@ -596,29 +595,29 @@ void handlePID() {
 	static int trendRight = 0;
 
 	ScopedGuard guard = makeScopedGuard([]() {
-		if ( counterL.get() != 0 ){
-			LOG_MSG("L: "  << counterL.toString() );
+		if (counterL.get() != 0) {
+			LOG_MSG("L: " << counterL.toString());
 		}
 		counterL.update(true);
-		
+
 		portEXIT_CRITICAL_ISR(&mux_l);
 	});
-	
+
 	portENTER_CRITICAL_ISR(&mux_r);
 	ScopedGuard guard1 = makeScopedGuard([]() {
 		if (counterR.get() != 0) {
-			LOG_MSG("R: " <<  counterR.toString() );
+			LOG_MSG("R: " << counterR.toString());
 		}
 		counterR.update(true);
-	
-      portEXIT_CRITICAL_ISR(&mux_r);
+
+		portEXIT_CRITICAL_ISR(&mux_r);
 
 	});
 
 	static int prev_counterR = 0;
 	static int prev_counterL = 0;
 
-	if ( motorR.getSpeed() != motorL.getSpeed() || motorR.getSpeed() == 0 && motorL.getSpeed() == 0) {
+	if (motorR.getSpeed() != motorL.getSpeed() || motorR.getSpeed() == 0 && motorL.getSpeed() == 0) {
 		counterL.m_counter = 0;
 		counterR.m_counter = 0;
 		return;
@@ -627,78 +626,78 @@ void handlePID() {
 	unsigned int leftRPM = counterL.calcRPM();
 	unsigned int rightRPM = counterR.calcRPM();
 
-	int32_t pwmR = computePIDR(rightRPM , leftRPM, kp, ki, kd, 0.5 ,0, 2000 );
+	int32_t pwmR = computePIDR(rightRPM, leftRPM, kp, ki, kd, 0.5, 0, 2000);
 	//pwmR = map(pwmR, -10, 10, -20, 20);
 
-	int32_t pwmL = computePIDL(leftRPM, rightRPM, kp, ki, kd, 0.5 , 0 , 2000 );
-//	pwmL = map(pwmL, -10, 10, -20, 20);
+	int32_t pwmL = computePIDL(leftRPM, rightRPM, kp, ki, kd, 0.5, 0, 2000);
+	//	pwmL = map(pwmL, -10, 10, -20, 20);
 
-	//motorR.adjust( motorR.getSpeed() + pwmR );
-	//motorL.adjust( motorL.getSpeed() + pwmL );
-
-
-
-// 	if ( speed != 0 && motorL.getSpeed() == motorR.getSpeed() )
-// 	{
-// 		if ( 0 == counterR.m_counter ) {
-// 			LOG_MSG("Boost right");
-// 		
-// 			if (motorR.getDirection() == Motor::Direction::FORWARD)
-// 				motorR.forward( speed + 0.1 * speed );
-// 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
-// 				motorR.backward( speed + 0.1 * speed );
-// 
-// 			delay(25);
-// 
-// 			if (motorR.getDirection() == Motor::Direction::FORWARD)
-// 				motorR.forward(speed);
-// 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
-// 				motorR.backward(speed);
-// 
-// 		}
-// 
-// 		if ( 0 == counterL.m_counter ) {
-// 
-// 			LOG_MSG("Boost left");
-// 		
-// 			if (motorL.getDirection() == Motor::Direction::FORWARD)
-// 				motorL.forward(speed + 0.1 * speed);
-// 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
-// 				motorL.backward(speed + 0.1 * speed);
-// 
-// 			delay(25);
-// 
-// 			if (motorL.getDirection() == Motor::Direction::FORWARD)
-// 				motorL.forward(speed);
-// 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
-// 				motorL.backward(speed);
-// 		}
-// 	}
-// 
-// 		
-
-	//float rouds_per_secR = (float) ( counterR.m_counter / 4.0 ) / 0.7;
-	//float rouds_per_secL = (float) ( counterL.m_counter / 4.0 ) / 0.7;
+		//motorR.adjust( motorR.getSpeed() + pwmR );
+		//motorL.adjust( motorL.getSpeed() + pwmL );
 
 
-	//int32_t pwmR = computePIDR( rouds_per_secR, rouds_per_secL , kp, ki, kd, 0.5 , 0 , 255 );
-	//int32_t pwmL = computePIDL( rouds_per_secL, rouds_per_secR , kp, ki, kd, 0.5 , 0 , 255 );
 
-	//LOG_MSG( "L : " << (float)rouds_per_secL << " R: " << (float)rouds_per_secR );
-	
+	// 	if ( speed != 0 && motorL.getSpeed() == motorR.getSpeed() )
+	// 	{
+	// 		if ( 0 == counterR.m_counter ) {
+	// 			LOG_MSG("Boost right");
+	// 		
+	// 			if (motorR.getDirection() == Motor::Direction::FORWARD)
+	// 				motorR.forward( speed + 0.1 * speed );
+	// 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
+	// 				motorR.backward( speed + 0.1 * speed );
+	// 
+	// 			delay(25);
+	// 
+	// 			if (motorR.getDirection() == Motor::Direction::FORWARD)
+	// 				motorR.forward(speed);
+	// 			if (motorR.getDirection() == Motor::Direction::BACKWARD)
+	// 				motorR.backward(speed);
+	// 
+	// 		}
+	// 
+	// 		if ( 0 == counterL.m_counter ) {
+	// 
+	// 			LOG_MSG("Boost left");
+	// 		
+	// 			if (motorL.getDirection() == Motor::Direction::FORWARD)
+	// 				motorL.forward(speed + 0.1 * speed);
+	// 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
+	// 				motorL.backward(speed + 0.1 * speed);
+	// 
+	// 			delay(25);
+	// 
+	// 			if (motorL.getDirection() == Motor::Direction::FORWARD)
+	// 				motorL.forward(speed);
+	// 			if (motorL.getDirection() == Motor::Direction::BACKWARD)
+	// 				motorL.backward(speed);
+	// 		}
+	// 	}
+	// 
+	// 		
+
+		//float rouds_per_secR = (float) ( counterR.m_counter / 4.0 ) / 0.7;
+		//float rouds_per_secL = (float) ( counterL.m_counter / 4.0 ) / 0.7;
+
+
+		//int32_t pwmR = computePIDR( rouds_per_secR, rouds_per_secL , kp, ki, kd, 0.5 , 0 , 255 );
+		//int32_t pwmL = computePIDL( rouds_per_secL, rouds_per_secR , kp, ki, kd, 0.5 , 0 , 255 );
+
+		//LOG_MSG( "L : " << (float)rouds_per_secL << " R: " << (float)rouds_per_secR );
+
 }
 
-enum MODE { IDLE , MOVING , SECURED };
+enum MODE { IDLE, MOVING, SECURED };
 
 MODE mode = SECURED;
 
 void stop_all() {
-	
-	if ( mode != SECURED )
-		soundEffect.playSound( SE_STOP_ENGINE , false );
-	
+
+	if (mode != SECURED)
+		soundEffect.playSound(SE_STOP_ENGINE, false);
+
 	mode = SECURED;
-	
+
 	motorL.stop();
 	motorR.stop();
 }
@@ -715,11 +714,11 @@ void loop()
 	int16_t rMotor = 0;
 	int16_t lMotor = 0;
 
-	motorR.run(); 
+	motorR.run();
 	motorL.run();
 	soundEffect.run();
 
-	if ( xSemaphoreTake( timerSemaphore, 0 ) == pdTRUE ) {
+	if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE) {
 		//adjust the speed
 		handlePID();
 		TIME.run();
@@ -785,17 +784,16 @@ void loop()
 
 
 		/************************************************************************/
-		if ( recieved_data.m_j4 ) {
-			if ( recieved_data.m_j4 > 15 ) {
-				turret.right( map(recieved_data.m_j4, 0, 127, 10, 200) );
-			}
-			else if ( recieved_data.m_j4 < -15 ) {
-				turret.left( map(recieved_data.m_j4, -127, 0, 200, 10) );
-			}
-			else{
-				turret.stop();
-			}
+		if (recieved_data.m_j4 > 10) {
+			turret.right(map(recieved_data.m_j4, 0, 127, 50, 150));
 		}
+		else if (recieved_data.m_j4 < -10) {
+			turret.left(map(recieved_data.m_j4, -127, 0, 150, 50));
+		}
+		else {
+			turret.stop();
+		}
+
 
 		// Send ack
 		payLoadAck.speed = lMotor;
@@ -805,10 +803,10 @@ void loop()
 		pre_recieved_data = recieved_data;
 	}
 
-	if ( lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS ) {
+	if (lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS) {
 		LOG_MSG("Lost connection");
 
-		//turret.step(200);
+		((Stepper)turret).step(200);
 
 		stop_all();
 
