@@ -26,6 +26,10 @@
 
 #include "Stepper.h"
 
+#include "Wire.h"
+
+#include "MPU6050.h"
+
 #include "XT_DAC_Audio.h"
 #include "0003idle_motor.mp3.h"
 //#include "0005start_moving.wav.h"
@@ -111,68 +115,90 @@ RF24 radio(_SS, _SCN, _SCK, _MISO, _MOSI);
 SemaphoreHandle_t xSemaphore = NULL;
 TaskHandle_t Task1;
 
+long map(const long x, const long in_min, const long in_max, const long out_min, const long out_max)
+{
+	// if input is smaller/bigger than expected return the min/max out ranges value
+	if (x < in_min)
+		return out_min;
+	else if (x > in_max)
+		return out_max;
+
+	else if (in_max == in_min)
+		return min(abs(in_max), abs(in_min));
+
+	// map the input to the output range.
+	// round up if mapping bigger ranges to smaller ranges
+	else  if ((in_max - in_min) > (out_max - out_min))
+		return (x - in_min) * (out_max - out_min + 1) / (in_max - in_min + 1) + out_min;
+	// round down if mapping smaller ranges to bigger ranges
+	else
+		return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
 class Turret : public Stepper
 {
-
 public:
 	Turret(int motor_pin_1, int motor_pin_2,
-		int motor_pin_3, int motor_pin_4) : Stepper(1028, motor_pin_1, motor_pin_2,
+		int motor_pin_3, int motor_pin_4) : Stepper( 1028, motor_pin_1, motor_pin_2,
 			motor_pin_3, motor_pin_4)
 	{
 		setSpeed(35);
 	}
 
-	void right(uint16_t degree = 0) {
-		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+	void right() {
+		if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
 			m_direction = 1;
-			m_steps_left = ( degree * number_of_steps  / 360 ) *  ( 160 / 12 )  ;
-			LOG_MSG(m_steps_left);
 			xSemaphoreGive(xSemaphore);
 		}
-
 	}
 
-	void left( uint16_t degree = 0 ) {
-		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
+	void left( int16_t degree = -1 ) {
+		if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
 			m_direction = -1;
-			m_steps_left = ( degree  * number_of_steps  / 360 ) *  ( 160 / 12 ) ;
-			LOG_MSG(m_steps_left);
 			xSemaphoreGive(xSemaphore);
 		}
+	}
+
+	void setDegree( int16_t degree ) {
+		if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
+
+			ScopedGuard guard = makeScopedGuard(
+				[]() { xSemaphoreGive(xSemaphore); });
+
+			int16_t delta_degree = degree - azimut();
+
+			LOG_MSG("Current azimut " << (float)azimut() << " delta_degree " << (short)delta_degree << " " << step_number);
+
+			if ( delta_degree < 0 )
+				m_direction = -1;
+			else
+				m_direction = 1;
+
+			m_angle_steps = ( abs( delta_degree )  * number_of_steps / 360 ) * ( 160 / 12 );
+		}
+	}
+
+	//move the motor X degrees + or -
+	void move ( int16_t degrees ) {
+			setDegree( azimut() + degrees);
 	}
 
 	void stop() {
 		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
-			LOG_MSG("stop turret");
+			LOG_MSG("stop turret " << azimut() );
 			m_direction = 0;
-			m_steps_left = 0;
+			m_angle_steps = 0;
 			xSemaphoreGive(xSemaphore);
 		}
 	}
 
+	int16_t azimut() const {
+		return m_azimut; //27 = 360 * 12 / 160
+	}
+
 	void  run() {
-
-		if ( m_steps_left > 0 )
-		{
-			//blocking
-			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY ))
-			{
-				ScopedGuard guard = makeScopedGuard(
-					[]() { xSemaphoreGive(xSemaphore); });
-
-				switch (m_direction)
-				{
-					case 1:
-						step( m_steps_left );
-						break;
-					case -1:
-						step( -m_steps_left );
-						break;
-				}					
-				m_steps_left = 0;
-			}
-		}
-		else
+		
+		if ( m_direction != 0 )
 		{
 			unsigned long now = micros();
 			// move only if the appropriate delay has passed:
@@ -185,32 +211,50 @@ public:
 					ScopedGuard guard = makeScopedGuard(
 						[]() { xSemaphoreGive(xSemaphore); });
 
-					if (m_direction == 1) {
+					if ( m_direction == 1 ) {
 						this->step_number++;
+						
+						m_azimut += 0.35 * 12 / 160  ;
+						
+						if (m_azimut > 360)
+							m_azimut = m_azimut - 360;
+
 						if (this->step_number == this->number_of_steps) {
 							this->step_number = 0;
 						}
 					}
-					else if (m_direction == -1) {
+					else if ( m_direction == -1 ) {
 						if (this->step_number == 0) {
 							this->step_number = this->number_of_steps;
 						}
+						
+						m_azimut -= 0.35 * 12 / 160 ;
+						
+						if (m_azimut < 0)
+							m_azimut = 360 + m_azimut;
 
 						this->step_number--;
 					}
 					else
 						return;
+
+					if ( 1 == m_angle_steps )
+						m_direction = 0;
+
+					if ( m_angle_steps > 0 )
+						m_angle_steps--;
+
 				}
 
-				stepMotor(this->step_number % 4);
+				stepMotor( this->step_number % 4 );
 			}
 		}
-		
 	}
 
 private:
 	int16_t m_direction = 0;
-	int16_t m_steps_left = 0;
+	int16_t m_angle_steps = 0;
+	float m_azimut = 0;
 };
 
 Turret turret(turret1Pin, turret2Pin, turret3Pin, turret4Pin);
@@ -387,10 +431,9 @@ constexpr int16_t motor_dead_zone = 25;
 //BTS7960_1PWM   motorR( motorRFrdPin, motorRBwdPin, motorRSpdPin, breakHook, motor_dead_zone);
 //BTS7960_1PWM   motorL( motorLFrdPin, motorLBwdPin, motorLSpdPin, []() {}, motor_dead_zone);
 
-
-
 TA6586   motorR(motorRFrdPin, motorRBwdPin, breakHook, motor_dead_zone);
 TA6586   motorL(motorLFrdPin, motorLBwdPin, []() {}, motor_dead_zone);
+
 
 void breakHook()
 {
@@ -459,6 +502,30 @@ int32_t computePIDL(float input, float setpoint, float kp, float ki, float kd, f
 
 
 
+struct {
+	bool enabled = false;
+	MPU6050 module;
+
+	void initialize()
+	{
+		Wire.beginTransmission(0x68);
+		if ( 0 == Wire.endTransmission() ) {
+			LOG_MSG("Found MPU");
+			module.initialize();
+			enabled = true;
+		}
+		else
+		{
+			LOG_MSG("NOT Found MPU");
+		}
+	}
+
+	MPU6050* operator->(){
+		return &module;
+	}
+} gyro;
+
+
 void setup()
 {
 	//Setup radio
@@ -494,12 +561,6 @@ void setup()
 	// Start an alarm
 	timerAlarmEnable(hr_timer);
 
-	//analogWriteFrequency(1000);
-	//analogWriteResolution(8);
-	/*ledcSetup( 0, 1000, 8 );
-	ledcAttachPin( motorRSpdPin, 0 );*/
-
-
 	//If slot is closed high if open low.
 	pinMode(motorLSpdReadPin, INPUT_PULLUP);
 	pinMode(motorRSpdReadPin, INPUT_PULLUP);
@@ -519,12 +580,17 @@ void setup()
 	motorR.begin();
 	motorL.begin();
 
+	//setup i2C
+
+	Wire.begin();
+
 	driver.begin();
 	driver.setPWMFreq(1600);
 	driver.setOutputMode(false);// + and pwm   if true ( - and pwm ) 
 
-	delay(1000);
+	gyro.initialize();
 
+	//Init CORE 1
 	xSemaphore = xSemaphoreCreateBinary();//created locked
 
 	disableCore0WDT();
@@ -533,13 +599,17 @@ void setup()
 		[](void *) {
 		try {
 			while (true) {
+				/*motorR.run();
+				motorL.run();
+				soundEffect.run();*/
 				turret.run();
+				handleGYRO();
 			}
 		}
 		catch (...) {
 			LOG_MSG("Critical error");
+			}
 		}
-	}
 		, "Task1"   // A name just for humans
 		, 4 * 1024  // This stack size can be checked & adjusted by reading the Stack Highwater
 		, NULL
@@ -548,29 +618,13 @@ void setup()
 		, 0);
 
 	xSemaphoreGive(xSemaphore);
+	////////////////////////////////////////////////
+	
+	delay(1000);
 
 	LOG_MSG("Ready");
 }
 
-long map(const long x, const long in_min, const long in_max, const long out_min, const long out_max)
-{
-	// if input is smaller/bigger than expected return the min/max out ranges value
-	if (x < in_min)
-		return out_min;
-	else if (x > in_max)
-		return out_max;
-
-	else if (in_max == in_min)
-		return min(abs(in_max), abs(in_min));
-
-	// map the input to the output range.
-	// round up if mapping bigger ranges to smaller ranges
-	else  if ((in_max - in_min) > (out_max - out_min))
-		return (x - in_min) * (out_max - out_min + 1) / (in_max - in_min + 1) + out_min;
-	// round down if mapping smaller ranges to bigger ranges
-	else
-		return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
-}
 
 void alg1(int16_t nJoyX, int16_t nJoyY, int16_t &o_m1 /*L*/, int16_t &o_m2 /*R*/)
 {
@@ -717,6 +771,22 @@ void handlePID() {
 
 }
 
+void handleGYRO()
+{
+	static unsigned long last_step_time = 0;
+	unsigned long now = millis();
+	// move only if the appropriate delay has passed:
+	if (now -  last_step_time >= 1000) {
+		// get the timeStamp of when you stepped:
+		last_step_time = now;
+		if (gyro.enabled) {
+		
+			LOG_MSG(gyro->getRotationX() );
+			LOG_MSG(gyro->getAccelerationX() );
+		}
+	}
+}
+
 enum MODE { IDLE, MOVING, SECURED };
 
 MODE mode = SECURED;
@@ -743,10 +813,6 @@ void loop()
 
 	int16_t rMotor = 0;
 	int16_t lMotor = 0;
-
-	motorR.run();
-	motorL.run();
-	soundEffect.run();
 
 	if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE) {
 		//adjust the speed
@@ -793,10 +859,10 @@ void loop()
 		/* Calculate motor PWM */
 		alg1(recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor);
 
-		(lMotor > 0) ? motorL.backward(map(lMotor, 0, 127, motor_dead_zone - 3, 255))
+		( lMotor > 0 ) ? motorL.backward(map(lMotor, 0, 127, motor_dead_zone - 3, 255))
 			: motorL.forward(map(lMotor, -127, 0, 255, motor_dead_zone - 3));
 
-		(rMotor > 0) ? motorR.backward(map(rMotor, 0, 127, motor_dead_zone - 3, 255))
+		( rMotor > 0 ) ? motorR.backward(map(rMotor, 0, 127, motor_dead_zone - 3, 255))
 			: motorR.forward(map(rMotor, -127, 0, 255, motor_dead_zone - 3));
 
 		if (SECURED == mode)
@@ -812,19 +878,30 @@ void loop()
 			mode = IDLE;
 		}
 
+		if ( recieved_data.m_b1 ) {
+			turret.setDegree(90);
+		}
 
-		/************************************************************************/
-		if (recieved_data.m_j4 > 10) {
-			//turret.right( map(recieved_data.m_j4, 0, 127, 0, 180) );
-			turret.right();
+		if ( recieved_data.m_b2 ) {
+			turret.setDegree(-90);
 		}
-		else if (recieved_data.m_j4 < -10) {
-			turret.left();
-			//turret.left( map(recieved_data.m_j4, -127, 0, 180, 0) );
+
+		if ( 0 == ( recieved_data.m_b1 | recieved_data.m_b2 ) )
+		{
+			/************************************************************************/
+			if (recieved_data.m_j4 >= 5) {
+				//turret.right( map(recieved_data.m_j4, 0, 127, 0, 180) );
+				turret.right();
+			}
+			else if (recieved_data.m_j4 <= -5) {
+				turret.left();
+				//turret.left( map(recieved_data.m_j4, -127, 0, 180, 0) );
+			}
+			else {
+				turret.stop();
+			}
 		}
-		else {
-			turret.stop();
-		}
+		
 
 
 		// Send ack
@@ -837,8 +914,6 @@ void loop()
 
 	if (lastRecievedTime < millis() - 3 * arduino::utils::RF_TIMEOUT_MS) {
 		LOG_MSG("Lost connection");
-
-		((Stepper)turret).step(200);
 
 		stop_all();
 
