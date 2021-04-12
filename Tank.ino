@@ -164,17 +164,28 @@ public:
 
 			ScopedGuard guard = makeScopedGuard(
 				[]() { xSemaphoreGive(xSemaphore); });
+			
+			if ( degree < 0 )
+				degree += 360 ;
+
+			if ( degree > 360 )
+				degree -= 360;
 
 			int16_t delta_degree = degree - azimut();
 
-			LOG_MSG("Current azimut " << (float)azimut() << " delta_degree " << (short)delta_degree << " " << step_number);
+			m_direction = ( delta_degree > 0 ) ? 1 : -1;
 
-			if ( delta_degree < 0 )
-				m_direction = -1;
-			else
-				m_direction = 1;
+			delta_degree = abs( delta_degree );
 
-			m_angle_steps = ( abs( delta_degree )  * number_of_steps / 360 ) * ( 160 / 12 );
+			if ( delta_degree > 180 ) {
+				m_direction = -m_direction;
+				
+				delta_degree = ( 360 - delta_degree ) ;
+			}
+
+			LOG_MSG("Current azimut " << (float)azimut() << " target " << (short)degree << " delta_degree " << (short)delta_degree );
+
+			m_angle_steps = ( delta_degree  * number_of_steps / 360 ) * ( 160 / 12 );
 		}
 	}
 
