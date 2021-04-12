@@ -148,6 +148,7 @@ public:
 	void right() {
 		if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
 			m_direction = 1;
+			m_target_azimut = -1;
 			xSemaphoreGive(xSemaphore);
 		}
 	}
@@ -155,51 +156,64 @@ public:
 	void left( int16_t degree = -1 ) {
 		if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
 			m_direction = -1;
+			m_target_azimut = -1;
 			xSemaphoreGive(xSemaphore);
 		}
 	}
 
 	void setDegree( int16_t degree ) {
-		if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
 
-			ScopedGuard guard = makeScopedGuard(
-				[]() { xSemaphoreGive(xSemaphore); });
-			
-			if ( degree < 0 )
-				degree += 360 ;
+		degree %= 360;
 
-			if ( degree > 360 )
-				degree -= 360;
+		if ( degree < 0 )
+			degree += 360;
 
-			int16_t delta_degree = degree - azimut();
+		auto delta_degree = degree - m_azimut;
 
-			m_direction = ( delta_degree > 0 ) ? 1 : -1;
+		if ( 0 != delta_degree )
+		{
+			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY ) ) {
 
-			delta_degree = abs( delta_degree );
+				ScopedGuard guard = makeScopedGuard(
+					[]() { xSemaphoreGive(xSemaphore); });
 
-			if ( delta_degree > 180 ) {
-				m_direction = -m_direction;
-				
-				delta_degree = ( 360 - delta_degree ) ;
+				delta_degree = degree - m_azimut;
+
+				if ( 0 != delta_degree )
+				{
+					m_direction = ( delta_degree > 0 ) ? 1 : -1;
+
+					delta_degree = abs( delta_degree );
+
+					if ( delta_degree > 180 ) {
+						m_direction = -m_direction;
+
+						delta_degree = (360 - delta_degree);
+					}
+
+					LOG_MSG("Current azimut " << (float)m_azimut << " target " << (short)degree << " delta_degree " << (short)delta_degree);
+
+					//formula to calculate steps from required degree
+					//m_angle_steps = (int16_t ) ( ( float ) ( delta_degree  * ( float ) number_of_steps / 360 ) * ( float )( 160 / 12 ) );
+
+					m_target_azimut = degree;
+				}
 			}
-
-			LOG_MSG("Current azimut " << (float)azimut() << " target " << (short)degree << " delta_degree " << (short)delta_degree );
-
-			m_angle_steps = ( delta_degree  * number_of_steps / 360 ) * ( 160 / 12 );
 		}
 	}
 
 	//move the motor X degrees + or -
 	void move ( int16_t degrees ) {
-			setDegree( azimut() + degrees);
+			setDegree( m_azimut + degrees);
 	}
 
 	void stop() {
 		if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY)) {
-			LOG_MSG("stop turret " << azimut() );
+			LOG_MSG("stop turret " << m_azimut );
 			m_direction = 0;
-			m_angle_steps = 0;
-			xSemaphoreGive(xSemaphore);
+			m_target_azimut = -1;
+		//	m_angle_steps = 0;
+			xSemaphoreGive( xSemaphore );
 		}
 	}
 
@@ -213,7 +227,7 @@ public:
 		{
 			unsigned long now = micros();
 			// move only if the appropriate delay has passed:
-			if (now - this->last_step_time >= this->step_delay) {
+			if ( now - this->last_step_time >= this->step_delay ) {
 				// get the timeStamp of when you stepped:
 				this->last_step_time = now;
 
@@ -222,42 +236,53 @@ public:
 					ScopedGuard guard = makeScopedGuard(
 						[]() { xSemaphoreGive(xSemaphore); });
 
-					if ( m_direction == 1 ) {
-						this->step_number++;
-						
-						m_azimut += 0.35 * 12 / 160  ;
-						
-						if (m_azimut > 360)
-							m_azimut = m_azimut - 360;
+					if ( 0 != m_direction  )
+					{
+						if (m_direction == 1) {
 
-						if (this->step_number == this->number_of_steps) {
-							this->step_number = 0;
+							this->step_number++;
+
+							if (this->step_number == this->number_of_steps) {
+								this->step_number = 0;
+							}
+
+							m_azimut += 0.35 * 12.0 / 160.0  ;
+
+							if (m_azimut > 360)
+								m_azimut = m_azimut - 360;
+
 						}
-					}
-					else if ( m_direction == -1 ) {
-						if (this->step_number == 0) {
-							this->step_number = this->number_of_steps;
+						else if (m_direction == -1) {
+
+							if (this->step_number == 0) {
+								this->step_number = this->number_of_steps;
+							}
+
+							this->step_number--;
+
+							m_azimut -= 0.35 * 12.0 / 160.0;
+
+							if ( m_azimut < 0 )
+								m_azimut = 360 + m_azimut;
 						}
-						
-						m_azimut -= 0.35 * 12 / 160 ;
-						
-						if (m_azimut < 0)
-							m_azimut = 360 + m_azimut;
 
-						this->step_number--;
+						stepMotor(this->step_number % 4);
 					}
-					else
-						return;
 
+					if ( -1 != m_target_azimut && abs( m_target_azimut - m_azimut ) < 0.02 ) {
+						m_direction = 0;
+						m_target_azimut = -1 ;//stop azimut movement
+					}
+
+			/*
 					if ( 1 == m_angle_steps )
 						m_direction = 0;
 
 					if ( m_angle_steps > 0 )
-						m_angle_steps--;
+						m_angle_steps--;*/
 
 				}
-
-				stepMotor( this->step_number % 4 );
+					
 			}
 		}
 	}
@@ -266,6 +291,7 @@ private:
 	int16_t m_direction = 0;
 	int16_t m_angle_steps = 0;
 	float m_azimut = 0;
+	float m_target_azimut = 0;
 };
 
 Turret turret(turret1Pin, turret2Pin, turret3Pin, turret4Pin);
