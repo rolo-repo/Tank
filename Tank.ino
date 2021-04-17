@@ -172,14 +172,12 @@ struct {
 		//normilize(gz);
 
 		//-180 ... 180
-		//if ( pdTRUE == xSemaphoreTake(xGyroSemaphore, portMAX_DELAY )) {
-		
-			m_dgx = (m_last_gx - gx);
-			m_dgy = (m_last_gy - gy);
-			m_dgz = (m_last_gz - gz);
+	
+		m_dgx += ( m_last_gx - gx );
+		m_dgy += ( m_last_gy - gy );
+		m_dgz += ( m_last_gz - gz );
 
-			xSemaphoreGive(xGyroSemaphore);
-		//}
+		xSemaphoreGive( xGyroSemaphore );
 		
 		m_last_gx = gx;
 		m_last_gy = gy;
@@ -312,13 +310,10 @@ public:
 	void  run() {
 
 		if ( m_locked ) {
-			if ( 0 != gyro.m_dgz ) {
-				if ( pdTRUE == xSemaphoreTake(xGyroSemaphore, 0 ) ) {
-					if ( 0 != gyro.m_dgz ) {
-						move( gyro.m_dgz );
-					//	gyro.m_dgz = 0;
-					}
-					//xSemaphoreGive( xGyroSemaphore );
+			if ( pdTRUE == xSemaphoreTake( xGyroSemaphore, 0 ) ) {
+				if ( 0 != gyro.m_dgz ) {
+					move( gyro.m_dgz );
+					gyro.m_dgz = 0;
 				}
 			}
 		}
@@ -892,8 +887,8 @@ void handleGYRO()
 	
 	gyro->update();
 
-	// move only if the appropriate delay has passed:
-	if ( now -  last_step_time >= 100 ) {
+	// move only if the appropriate delay has passed - it is smoothing the turret rotation
+	if ( now -  last_step_time >= 150 ) {
 		
 		// get the timeStamp of when you stepped:
 		last_step_time = now;
