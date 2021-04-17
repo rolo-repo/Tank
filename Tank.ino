@@ -20,7 +20,6 @@
 #include "Led.h"
 #include "ScopedGuard.h"
 
-
 #include "SerialOutput.h"
 #include "TimeManager.h"
 
@@ -28,7 +27,7 @@
 
 #include "Wire.h"
 
-#include "MPU6050.h"
+#include "MPU6050_light.h"
 
 #include "XT_DAC_Audio.h"
 #include "0003idle_motor.mp3.h"
@@ -113,6 +112,7 @@ hw_timer_t * hr_timer = NULL;
 RF24 radio(_SS, _SCN, _SCK, _MISO, _MOSI);
 
 SemaphoreHandle_t xSemaphore = NULL;
+SemaphoreHandle_t xGyroSemaphore = NULL;
 TaskHandle_t Task1;
 
 long map(const long x, const long in_min, const long in_max, const long out_min, const long out_max)
@@ -134,6 +134,66 @@ long map(const long x, const long in_min, const long in_max, const long out_min,
 	else
 		return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
+
+struct {
+	bool enabled = false;
+	MPU6050 module;
+
+	void initialize() {
+		if ( 0 == module.begin(0,0) ) {
+			module.calcGyroOffsets( );
+			LOG_MSG("Found MPU , Calculating offsets");
+			enabled = true;
+		}
+		else
+		{
+			LOG_MSG("NOT Found MPU");
+		}
+	}
+
+	MPU6050* operator->() {
+		return &module;
+	}
+
+	void normilize(int16_t &io_degree)const {
+		if (io_degree < 0)
+			io_degree += 360;
+	}
+
+	bool run() {
+
+		float ax, ay, az, gx, gy, gz;
+		gz = module.getAngleZ();
+		gy = module.getAngleY();
+		gx = module.getAngleX();
+
+		//normilize(gx);
+		//normilize(gy);
+		//normilize(gz);
+
+		//-180 ... 180
+		//if ( pdTRUE == xSemaphoreTake(xGyroSemaphore, portMAX_DELAY )) {
+		
+			m_dgx = (m_last_gx - gx);
+			m_dgy = (m_last_gy - gy);
+			m_dgz = (m_last_gz - gz);
+
+			xSemaphoreGive(xGyroSemaphore);
+		//}
+		
+		m_last_gx = gx;
+		m_last_gy = gy;
+		m_last_gz = gz;
+
+		//LOG_MSG("gz" << (int)gz << " m_dgz " << (int)m_dgz << " gx " << (int)gx);
+
+		return 1;
+	}
+
+	int16_t m_dgx = 0, m_dgy = 0, m_dgz = 0;
+	float m_last_gx = 0, m_last_gy = 0, m_last_gz = 0;
+
+} gyro;
 
 class Turret : public Stepper
 {
@@ -168,11 +228,11 @@ public:
 		if ( degree < 0 )
 			degree += 360;
 
-		auto delta_degree = degree - m_azimut;
-
+		float delta_degree = degree - m_azimut;
+		
 		if ( 0 != delta_degree )
 		{
-			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY ) ) {
+			if ( pdTRUE == xSemaphoreTake( xSemaphore, portMAX_DELAY ) ) {
 
 				ScopedGuard guard = makeScopedGuard(
 					[]() { xSemaphoreGive(xSemaphore); });
@@ -188,10 +248,10 @@ public:
 					if ( delta_degree > 180 ) {
 						m_direction = -m_direction;
 
-						delta_degree = (360 - delta_degree);
+						delta_degree = ( 360 - delta_degree );
 					}
 
-					LOG_MSG("Current azimut " << (float)m_azimut << " target " << (short)degree << " delta_degree " << (short)delta_degree);
+					LOG_MSG("Current azimut " << (float)m_azimut << " target " << (float)degree << " delta_degree " << (float)delta_degree << " dir " << m_direction );
 
 					//formula to calculate steps from required degree
 					//m_angle_steps = (int16_t ) ( ( float ) ( delta_degree  * ( float ) number_of_steps / 360 ) * ( float )( 160 / 12 ) );
@@ -203,8 +263,11 @@ public:
 	}
 
 	//move the motor X degrees + or -
-	void move ( int16_t degrees ) {
-			setDegree( m_azimut + degrees);
+	void move ( float degrees ) {
+		if ( m_target_azimut != -1 )
+			setDegree( m_target_azimut + degrees );
+		else 
+			setDegree( m_azimut + degrees );
 	}
 
 	void stop() {
@@ -221,8 +284,45 @@ public:
 		return m_azimut; //27 = 360 * 12 / 160
 	}
 
+	bool lock() {
+		if ( !m_locked )
+		{
+			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
+				m_locked = true;
+				xSemaphoreGive(xSemaphore);
+			}
+		}
+
+		return m_locked;
+	}
+
+	bool unlock() {
+
+		if ( m_locked )
+		{
+			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
+				m_locked = false;
+				xSemaphoreGive(xSemaphore);
+			}
+		}
+
+		return m_locked;
+	}
+
 	void  run() {
-		
+
+		if ( m_locked ) {
+			if ( 0 != gyro.m_dgz ) {
+				if ( pdTRUE == xSemaphoreTake(xGyroSemaphore, 0 ) ) {
+					if ( 0 != gyro.m_dgz ) {
+						move( gyro.m_dgz );
+					//	gyro.m_dgz = 0;
+					}
+					//xSemaphoreGive( xGyroSemaphore );
+				}
+			}
+		}
+
 		if ( m_direction != 0 )
 		{
 			unsigned long now = micros();
@@ -231,18 +331,18 @@ public:
 				// get the timeStamp of when you stepped:
 				this->last_step_time = now;
 
-				if (pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY))
+				if (pdTRUE == xSemaphoreTake( xSemaphore, portMAX_DELAY ))
 				{
 					ScopedGuard guard = makeScopedGuard(
 						[]() { xSemaphoreGive(xSemaphore); });
 
 					if ( 0 != m_direction  )
 					{
-						if (m_direction == 1) {
+						if ( m_direction == 1 ) {
 
 							this->step_number++;
 
-							if (this->step_number == this->number_of_steps) {
+							if ( this->step_number == this->number_of_steps ) {
 								this->step_number = 0;
 							}
 
@@ -252,7 +352,7 @@ public:
 								m_azimut = m_azimut - 360;
 
 						}
-						else if (m_direction == -1) {
+						else if ( m_direction == -1 ) {
 
 							if (this->step_number == 0) {
 								this->step_number = this->number_of_steps;
@@ -269,9 +369,10 @@ public:
 						stepMotor(this->step_number % 4);
 					}
 
-					if ( -1 != m_target_azimut && abs( m_target_azimut - m_azimut ) < 0.02 ) {
+					if ( -1 != m_target_azimut && abs( m_target_azimut - m_azimut ) < 0.35 ) {
 						m_direction = 0;
 						m_target_azimut = -1 ;//stop azimut movement
+						m_azimut = (int16_t)m_azimut;
 					}
 
 			/*
@@ -292,6 +393,7 @@ private:
 	int16_t m_angle_steps = 0;
 	float m_azimut = 0;
 	float m_target_azimut = 0;
+	bool m_locked = false;
 };
 
 Turret turret(turret1Pin, turret2Pin, turret3Pin, turret4Pin);
@@ -537,32 +639,6 @@ int32_t computePIDL(float input, float setpoint, float kp, float ki, float kd, f
 	return constrain(err * kp + integral + D * kd, minOut, maxOut);
 }
 
-
-
-struct {
-	bool enabled = false;
-	MPU6050 module;
-
-	void initialize()
-	{
-		Wire.beginTransmission(0x68);
-		if ( 0 == Wire.endTransmission() ) {
-			LOG_MSG("Found MPU");
-			module.initialize();
-			enabled = true;
-		}
-		else
-		{
-			LOG_MSG("NOT Found MPU");
-		}
-	}
-
-	MPU6050* operator->(){
-		return &module;
-	}
-} gyro;
-
-
 void setup()
 {
 	//Setup radio
@@ -625,7 +701,9 @@ void setup()
 	driver.setPWMFreq(1600);
 	driver.setOutputMode(false);// + and pwm   if true ( - and pwm ) 
 
+	xGyroSemaphore = xSemaphoreCreateBinary();
 	gyro.initialize();
+	xSemaphoreGive( xGyroSemaphore );
 
 	//Init CORE 1
 	xSemaphore = xSemaphoreCreateBinary();//created locked
@@ -640,7 +718,6 @@ void setup()
 				motorL.run();
 				soundEffect.run();*/
 				turret.run();
-				handleGYRO();
 			}
 		}
 		catch (...) {
@@ -812,15 +889,19 @@ void handleGYRO()
 {
 	static unsigned long last_step_time = 0;
 	unsigned long now = millis();
+	
+	gyro->update();
+
 	// move only if the appropriate delay has passed:
-	if (now -  last_step_time >= 1000) {
+	if ( now -  last_step_time >= 100 ) {
+		
 		// get the timeStamp of when you stepped:
 		last_step_time = now;
-		if (gyro.enabled) {
-		
-			LOG_MSG(gyro->getRotationX() );
-			LOG_MSG(gyro->getAccelerationX() );
-		}
+	
+		if ( gyro.run() ) {
+		//	LOG_MSG("gz " << gyro.m_dgz);
+		}	
+
 	}
 }
 
@@ -851,15 +932,17 @@ void loop()
 	int16_t rMotor = 0;
 	int16_t lMotor = 0;
 
-	if (xSemaphoreTake(timerSemaphore, 0) == pdTRUE) {
+	if ( xSemaphoreTake(timerSemaphore, 0) == pdTRUE ) {
 		//adjust the speed
 		handlePID();
 		TIME.run();
 		scheduler.run();
 	}
 
-	while (radio.available(&pipeNo))
-	{
+	handleGYRO();
+
+	while ( radio.available(&pipeNo) ) {
+
 		radio.read(&recieved_data, sizeof(recieved_data));
 
 		if (!recieved_data.isValid()) {
@@ -896,7 +979,7 @@ void loop()
 		/* Calculate motor PWM */
 		alg1(recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor);
 
-		( lMotor > 0 ) ? motorL.backward(map(lMotor, 0, 127, motor_dead_zone - 3, 255))
+		( lMotor > 0 ) ? motorL.backward(map( lMotor, 0, 127, motor_dead_zone - 3, 255 ))
 			: motorL.forward(map(lMotor, -127, 0, 255, motor_dead_zone - 3));
 
 		( rMotor > 0 ) ? motorR.backward(map(rMotor, 0, 127, motor_dead_zone - 3, 255))
@@ -916,15 +999,16 @@ void loop()
 		}
 
 		if ( recieved_data.m_b1 ) {
-			turret.setDegree(90);
+			turret.setDegree( 90 );
 		}
 
-		if ( recieved_data.m_b2 ) {
-			turret.setDegree(-90);
+		if ( recieved_data.m_b2 && gyro.enabled ) {
+			turret.lock();
 		}
+		else {
+			
+			turret.unlock();
 
-		if ( 0 == ( recieved_data.m_b1 | recieved_data.m_b2 ) )
-		{
 			/************************************************************************/
 			if (recieved_data.m_j4 >= 5) {
 				//turret.right( map(recieved_data.m_j4, 0, 127, 0, 180) );
@@ -938,6 +1022,22 @@ void loop()
 				turret.stop();
 			}
 		}
+
+// 		if ( 0 == ( recieved_data.m_b1 | recieved_data.m_b2 ) )
+// 		{
+// 			/************************************************************************/
+// 			if (recieved_data.m_j4 >= 5) {
+// 				//turret.right( map(recieved_data.m_j4, 0, 127, 0, 180) );
+// 				turret.right();
+// 			}
+// 			else if (recieved_data.m_j4 <= -5) {
+// 				turret.left();
+// 				//turret.left( map(recieved_data.m_j4, -127, 0, 180, 0) );
+//			}
+// 			else {
+// 				turret.stop();
+// 			}
+// 		}
 		
 
 
