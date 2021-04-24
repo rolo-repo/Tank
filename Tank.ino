@@ -200,7 +200,7 @@ public:
 		int motor_pin_3, int motor_pin_4) : Stepper( 1028, motor_pin_1, motor_pin_2,
 			motor_pin_3, motor_pin_4)
 	{
-		setSpeed(35);
+		setSpeed(50);
 	}
 
 	void right() {
@@ -888,7 +888,7 @@ void handleGYRO()
 	gyro->update();
 
 	// move only if the appropriate delay has passed - it is smoothing the turret rotation
-	if ( now -  last_step_time >= 150 ) {
+	if ( now -  last_step_time >= 100 ) {
 		
 		// get the timeStamp of when you stepped:
 		last_step_time = now;
