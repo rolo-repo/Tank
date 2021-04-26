@@ -31,7 +31,7 @@
 
 #include "XT_DAC_Audio.h"
 #include "0003idle_motor.mp3.h"
-//#include "0005start_moving.wav.h"
+#include "0005start_moving.wav.h"
 //#include "0004moving.wav.h"
 /*
 0	pulled up	OK	outputs PWM signal at boot
@@ -520,7 +520,7 @@ static struct XT_SoundEffect
 } SoundEffects[] = {
 	 XT_SoundEffect(SE_START_ENGINE , idle_motor , false) , // 0
 	 XT_SoundEffect(SE_IDLE , idle_motor , true), // 1
-	 XT_SoundEffect(SE_MOVING , idle_motor , true),
+	 XT_SoundEffect(SE_MOVING , start_moving , true),
 	 XT_SoundEffect(SE_STOP_ENGINE , idle_motor , false),//3
 	 XT_SoundEffect(SE_LAST , idle_motor , false)	// 4
 };
@@ -530,11 +530,12 @@ class SoundEffect {
 public:
 	SoundEffect() {
 		next = []() {};
+		DacAudio.DacVolume = 100;
 	}
 
 	void run() {
 		DacAudio.FillBuffer();
-
+		
 		// 		if ( dfPlayer.available() ) {
 		// 			switch ( dfPlayer.readType() ) {
 		// 			   case DFPlayerPlayFinished:
@@ -545,12 +546,20 @@ public:
 	}
 
 	void mute() {
+		DacAudio.DacVolume = 0;
 		DacAudio.StopAllSounds();
+	}
+
+	void unmute() {
+		DacAudio.DacVolume = 100;
 	}
 
 	void playSound(SOUND_EFFECT_ID i_sound, bool i_is_mix = true) {
 		int16_t sound_id = constrain(i_sound, 0, SOUND_EFFECT_ID::SE_LAST);
-		DacAudio.Play(&SoundEffects[sound_id].sound, i_is_mix);
+
+		if ( !DacAudio.AlreadyPlaying(&SoundEffects[sound_id].sound ) ) {
+			DacAudio.Play(&SoundEffects[sound_id].sound, i_is_mix);
+		}
 	}
 
 private:
@@ -710,8 +719,8 @@ void setup()
 		try {
 			while (true) {
 				/*motorR.run();
-				motorL.run();
-				soundEffect.run();*/
+				motorL.run();*/
+				soundEffect.run();
 				turret.run();
 			}
 		}
