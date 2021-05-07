@@ -111,7 +111,6 @@ hw_timer_t * hr_timer = NULL;
 //ce, csn
 RF24 radio(_SS, _SCN, _SCK, _MISO, _MOSI);
 
-SemaphoreHandle_t xSemaphore = NULL;
 SemaphoreHandle_t xGyroSemaphore = NULL;
 TaskHandle_t Task1;
 
@@ -139,7 +138,7 @@ struct {
 	bool enabled = false;
 	MPU6050 module;
 
-	void initialize() {
+	void begin() {
 		if ( 0 == module.begin(0,0) ) {
 			module.calcGyroOffsets( );
 			LOG_MSG("Found MPU , Calculating offsets");
@@ -195,12 +194,21 @@ struct {
 
 class Turret : public Stepper
 {
+private :
+	
+	SemaphoreHandle_t xSemaphore = NULL;
+
 public:
 	Turret(int motor_pin_1, int motor_pin_2,
-		int motor_pin_3, int motor_pin_4) : Stepper( 1028, motor_pin_1, motor_pin_2,
+		int motor_pin_3, int motor_pin_4) : Stepper(1028, motor_pin_1, motor_pin_2,
 			motor_pin_3, motor_pin_4)
 	{
 		setSpeed(50);
+
+	}
+	void begin() {
+		xSemaphore = xSemaphoreCreateBinary();//created locked
+		xSemaphoreGive(xSemaphore);
 	}
 
 	void right() {
@@ -233,7 +241,7 @@ public:
 			if ( pdTRUE == xSemaphoreTake( xSemaphore, portMAX_DELAY ) ) {
 
 				ScopedGuard guard = makeScopedGuard(
-					[]() { xSemaphoreGive(xSemaphore); });
+					[](SemaphoreHandle_t xSemaphore) { xSemaphoreGive(xSemaphore); }, xSemaphore);
 
 				delta_degree = degree - m_azimut;
 
@@ -329,7 +337,7 @@ public:
 				if (pdTRUE == xSemaphoreTake( xSemaphore, portMAX_DELAY ))
 				{
 					ScopedGuard guard = makeScopedGuard(
-						[]() { xSemaphoreGive(xSemaphore); });
+						[](SemaphoreHandle_t xSemaphore ) { xSemaphoreGive(xSemaphore); }, xSemaphore );
 
 					if ( 0 != m_direction  )
 					{
@@ -706,12 +714,12 @@ void setup()
 	driver.setOutputMode(false);// + and pwm   if true ( - and pwm ) 
 
 	xGyroSemaphore = xSemaphoreCreateBinary();
-	gyro.initialize();
+	gyro.begin();
 	xSemaphoreGive( xGyroSemaphore );
-
+	
+	turret.begin();//create semaphor
 	//Init CORE 1
-	xSemaphore = xSemaphoreCreateBinary();//created locked
-
+	
 	disableCore0WDT();
 
 	xTaskCreatePinnedToCore(
@@ -734,8 +742,6 @@ void setup()
 		, 2  // Priority, with 3 (configMAX_PRIORITIES - 1) being the highest, and 0 being the lowest.
 		, &Task1
 		, 0);
-
-	xSemaphoreGive(xSemaphore);
 	////////////////////////////////////////////////
 	
 	delay(1000);
