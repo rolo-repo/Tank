@@ -291,25 +291,22 @@ public:
 	}
 
 	bool lock() {
-		if ( !m_locked )
-		{
-			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
-				m_locked = true;
-				xSemaphoreGive(xSemaphore);
-			}
+
+		if ( !m_locked && pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
+			LOG_MSG("locking , azimut " << m_azimut);
+			m_locked = true;
+			xSemaphoreGive(xSemaphore);
 		}
 
 		return m_locked;
 	}
 
 	bool unlock() {
-
-		if ( m_locked )
-		{
-			if ( pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
-				m_locked = false;
-				xSemaphoreGive(xSemaphore);
-			}
+			
+		if ( m_locked && pdTRUE == xSemaphoreTake(xSemaphore, portMAX_DELAY )) {
+			LOG_MSG("unlocking , azimut " << m_azimut);
+			m_locked = false;
+			xSemaphoreGive(xSemaphore);
 		}
 
 		return m_locked;
@@ -319,7 +316,7 @@ public:
 
 		if ( m_locked ) {
 			if ( pdTRUE == xSemaphoreTake( xGyroSemaphore, 0 ) ) {
-				if ( 0 != gyro.m_dgz ) {
+				if ( m_locked && 0 != gyro.m_dgz ) {
 					move( gyro.m_dgz );
 					gyro.m_dgz = 0;
 				}
