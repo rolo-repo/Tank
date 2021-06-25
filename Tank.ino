@@ -4,6 +4,11 @@
 	Author:     NTNET\ROMANL
 */
 
+#include "freertos/queue.h"
+#include "driver/i2s.h"
+
+
+
 #include "SPI.h"
 #include "RF24.h"
 #include "nRF24L01.h"
@@ -28,10 +33,10 @@
 #include "Wire.h"
 
 #include "MPU6050_light.h"
+#include "SoundEffectI2S.h"
+//#include "XT_DAC_Audio.h"
 
-#include "XT_DAC_Audio.h"
-#include "0003idle_motor.mp3.h"
-#include "0005start_moving.wav.h"
+//#include "0005start_moving.wav.h"
 //#include "0004moving.wav.h"
 /*
 0	pulled up	OK	outputs PWM signal at boot
@@ -503,74 +508,7 @@ volatile encCounter counterL(motorLSpdReadPin);
 volatile encCounter counterR(motorRSpdReadPin);
 
 
-XT_DAC_Audio_Class DacAudio(audioOutputPin, 1);
-
-enum SOUND_EFFECT_ID {
-	SE_START_ENGINE = 0,
-	SE_IDLE = 1,
-	SE_MOVING = 2,
-	SE_STOP_ENGINE = 3,
-	//	SE_BREAK,
-	//	SE_TURN_TURRET,
-	//	SE_MOVE_BARREL,
-	//	SE_FIRE ,
-	SE_LAST
-};
-
-static struct XT_SoundEffect
-{
-	SOUND_EFFECT_ID id;
-	XT_Wav_Class sound;
-	XT_SoundEffect(SOUND_EFFECT_ID i_id, const unsigned char* i_wav, bool i_is_loop = false) : id(i_id), sound(XT_Wav_Class(i_wav)) { sound.RepeatForever = i_is_loop; }
-} SoundEffects[] = {
-	 XT_SoundEffect(SE_START_ENGINE , idle_motor , false) , // 0
-	 XT_SoundEffect(SE_IDLE , idle_motor , true), // 1
-	 XT_SoundEffect(SE_MOVING , start_moving , true),
-	 XT_SoundEffect(SE_STOP_ENGINE , idle_motor , false),//3
-	 XT_SoundEffect(SE_LAST , idle_motor , false)	// 4
-};
-
-class SoundEffect {
-
-public:
-	SoundEffect() {
-		next = []() {};
-		DacAudio.DacVolume = 100;
-	}
-
-	void run() {
-		DacAudio.FillBuffer();
-		
-		// 		if ( dfPlayer.available() ) {
-		// 			switch ( dfPlayer.readType() ) {
-		// 			   case DFPlayerPlayFinished:
-		// 				   next();
-		// 				   break;
-		// 			}				
-		// 		}
-	}
-
-	void mute() {
-		DacAudio.DacVolume = 0;
-		DacAudio.StopAllSounds();
-	}
-
-	void unmute() {
-		DacAudio.DacVolume = 100;
-	}
-
-	void playSound(SOUND_EFFECT_ID i_sound, bool i_is_mix = true) {
-		int16_t sound_id = constrain(i_sound, 0, SOUND_EFFECT_ID::SE_LAST);
-
-		if ( !DacAudio.AlreadyPlaying(&SoundEffects[sound_id].sound ) ) {
-			DacAudio.Play(&SoundEffects[sound_id].sound, i_is_mix);
-		}
-	}
-
-private:
-	typedef std::function<void()> NextPlay;
-	NextPlay next;
-} soundEffect;
+//XT_DAC_Audio_Class DacAudio(audioOutputPin, 1);
 
 void breakHook();
 
@@ -582,6 +520,7 @@ constexpr int16_t motor_dead_zone = 25;
 TA6586   motorR(motorRFrdPin, motorRBwdPin, breakHook, motor_dead_zone);
 TA6586   motorL(motorLFrdPin, motorLBwdPin, []() {}, motor_dead_zone);
 
+SoundEffectI2S soundEffect;
 
 void breakHook()
 {
@@ -698,6 +637,7 @@ void setup()
 		portEXIT_CRITICAL_ISR(&mux); }
 	);
 	*/
+	soundEffect.begin();
 
 	motorR.begin();
 	motorL.begin();
@@ -714,6 +654,8 @@ void setup()
 	gyro.begin();
 	xSemaphoreGive( xGyroSemaphore );
 	
+	
+
 	turret.begin();//create semaphor
 	//Init CORE 1
 	
@@ -919,7 +861,7 @@ MODE mode = SECURED;
 void stop_all() {
 
 	if (mode != SECURED)
-		soundEffect.playSound(SE_STOP_ENGINE, false);
+		soundEffect.play(SE_STOP_ENGINE, false);
 
 	mode = SECURED;
 
@@ -930,6 +872,7 @@ void stop_all() {
 void loop()
 {
 	using namespace arduino::utils;
+
 	static uint64_t t = millis();
 	byte pipeNo;
 	static unsigned long lastRecievedTime = millis();
@@ -947,6 +890,7 @@ void loop()
 	}
 
 	handleGYRO();
+	soundEffect.play(SE_IDLE, true);
 
 	while ( radio.available(&pipeNo) ) {
 
@@ -983,6 +927,16 @@ void loop()
 			backLight.turn_off();
 		}
 
+		if (recieved_data.m_b4) {
+			soundEffect.mute();
+		}
+		else 
+		{
+			soundEffect.mute(false);
+		}
+
+
+
 		/* Calculate motor PWM */
 		alg1(recieved_data.m_steering, recieved_data.m_speed, lMotor, rMotor);
 
@@ -993,15 +947,15 @@ void loop()
 			: motorR.forward(map(rMotor, -127, 0, 255, motor_dead_zone - 3));
 
 		if (SECURED == mode)
-			soundEffect.playSound(SE_START_ENGINE, false);
+			soundEffect.play( SE_START_ENGINE, false);
 
 		if (((uint8_t)motorR.getDirection() | (uint8_t)motorL.getDirection())
 			!= (uint8_t)Motor::Direction::STOPED) {
-			soundEffect.playSound(SE_MOVING, true);
+			soundEffect.play( SE_MOVING, true);
 			mode = MOVING;
 		}
 		else {
-			soundEffect.playSound(SE_IDLE, true);
+			soundEffect.play( SE_IDLE, true);
 			mode = IDLE;
 		}
 

@@ -261,3 +261,10 @@ __pycache__/
 *.pyc
 __vm/
 *vcxproj*
+/sounds/0002.wav
+/sounds/0001.wav
+/sounds
+/SoundEffectXT.h
+/SoundEffectXT.cpp
+/SoundEffectDFPlayer.h
+/SoundEffectDFPlayer.cpp
